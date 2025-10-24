@@ -1,0 +1,5 @@
+;!@Install@!UTF-8!
+Title="SRGB Effect Installer"
+BeginPrompt="Do you want to extract and run the program?"
+RunProgram="launcher.bat"
+;!@InstallEnd@!

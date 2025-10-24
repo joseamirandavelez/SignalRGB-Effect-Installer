@@ -59,8 +59,8 @@ try {
     # Define shortcut paths
     $desktopPath = [Environment]::GetFolderPath("Desktop")
     $startMenuPath = [Environment]::GetFolderPath("Programs")
-    $Global:DesktopShortcutPath = Join-Path -Path $desktopPath -ChildPath "Effect Installer.lnk"
-    $Global:StartMenuShortcutPath = Join-Path -Path $startMenuPath -ChildPath "SignalRGB Tools\Effect Installer.lnk"
+    $Global:DesktopShortcutPath = Join-Path -Path $desktopPath -ChildPath "SRGB Effect Installer.lnk"
+    $Global:StartMenuShortcutPath = Join-Path -Path $startMenuPath -ChildPath "SRGB Tools\SRGB Effect Installer.lnk"
     
 } catch {
     [System.Windows.Forms.MessageBox]::Show("CRITICAL ERROR: Could not determine script's own path. Shortcuts will fail. `n$($_.Exception.Message)", "Error", "OK", "Error")
@@ -143,7 +143,7 @@ function Show-CreateShortcutWindow {
     $layout.Controls.Add($chkDesktop, 0, 1)
 
     $chkStartMenu = New-Object System.Windows.Forms.CheckBox
-    $chkStartMenu.Text = "In the Start Menu (under 'SignalRGB Tools')"
+    $chkStartMenu.Text = "In the Start Menu (under SRGB Tools')"
     $chkStartMenu.Checked = $CheckStartMenu
     $chkStartMenu.Dock = 'Fill'
     $layout.Controls.Add($chkStartMenu, 0, 2)
@@ -639,7 +639,83 @@ function Set-ActiveEffectRegistryKeys {
     }
 }
 
-# --- REMOVED Swap-ActiveEffectRegistryKeys function ---
+# --- NEW: Disclaimer Window Function ---
+function Show-DisclaimerWindow {
+    
+    # Define the disclaimer text
+    $disclaimerText = @"
+SRGB Effect Installer - Terms of Use
+
+1. No Warranty
+This Tool is provided "as-is", without any warranties of any kind, express or implied. The developer makes no guarantees regarding its functionality, reliability, or suitability for any particular purpose.
+
+2. No Affiliation
+The developer of this Tool is not associated with SignalRGB or its parent company, WhirlwindFX. This is an unofficial, third-party application.
+
+3. Limitation of Liability
+In no event shall the developer be liable for any claim, damages, or other liability arising from the use of, or inability to use, the Tool.
+
+4. User Responsibility
+You are solely responsible for the effects you download and install. It is your responsibility to ensure they comply with the terms of service of any platform or application they are used with, including SignalRGB.
+
+5. Content Disclaimer
+The developer is not responsible for any content, including effects, installed by users of this Tool. Some user-generated effects may be inappropriate or unsuitable for certain audiences. Use caution when downloading or loading effects from others.
+
+6. License (GNU GPLv3.0)
+This project is licensed under the GNU General Public License v3.0. For the full license text, please see the project's GitHub page:
+https://github.com/joseamirandavelez/SignalRGB-Effect-Installer
+"@
+
+    $disclaimerForm = New-Object System.Windows.Forms.Form
+    $disclaimerForm.Text = "Disclaimer & Terms of Use"
+    $disclaimerForm.Size = New-Object System.Drawing.Size(550, 450)
+    $disclaimerForm.FormBorderStyle = 'FixedDialog'
+    $disclaimerForm.MaximizeBox = $false
+    $disclaimerForm.MinimizeBox = $false
+    $disclaimerForm.StartPosition = 'CenterParent'
+    if ($Global:mainForm.Icon) { $disclaimerForm.Icon = $Global:mainForm.Icon }
+
+    $layout = New-Object System.Windows.Forms.TableLayoutPanel
+    $layout.Dock = 'Fill'
+    $layout.Padding = 10
+    $layout.ColumnCount = 1
+    $layout.RowCount = 2
+    $layout.RowStyles.Add((New-Object System.Windows.Forms.RowStyle([System.Windows.Forms.SizeType]::Percent, 100))) | Out-Null
+    $layout.RowStyles.Add((New-Object System.Windows.Forms.RowStyle([System.Windows.Forms.SizeType]::AutoSize))) | Out-Null
+    $disclaimerForm.Controls.Add($layout)
+
+    $rtbDisclaimer = New-Object System.Windows.Forms.RichTextBox
+    $rtbDisclaimer.Dock = 'Fill'
+    $rtbDisclaimer.ReadOnly = $true
+    $rtbDisclaimer.DetectUrls = $true
+    $rtbDisclaimer.Text = $disclaimerText
+    $rtbDisclaimer.Margin = [System.Windows.Forms.Padding]::new(0, 0, 0, 10)
+    $layout.Controls.Add($rtbDisclaimer, 0, 0)
+
+    $btnOK = New-Object System.Windows.Forms.Button
+    $btnOK.Text = "OK"
+    $btnOK.DialogResult = 'OK'
+    $btnOK.Dock = 'None'
+    $btnOK.Anchor = 'Right'
+    $btnOK.Height = 30
+    $btnOK.Width = 80
+    $layout.Controls.Add($btnOK, 0, 1)
+
+    $rtbDisclaimer.Add_LinkClicked({
+        param($sender, $e)
+        # Open the link in the default browser
+        try {
+            [System.Diagnostics.Process]::Start($e.LinkText)
+        } catch {
+            Log-Status "ERROR: Could not open URL: $($e.LinkText)"
+        }
+    })
+
+    $disclaimerForm.AcceptButton = $btnOK
+    $disclaimerForm.ShowDialog($Global:mainForm) | Out-Null
+    $disclaimerForm.Dispose()
+}
+
 
 # --- Main Installation Logic ---
 
@@ -869,7 +945,7 @@ function Start-Installation {
 
 # --- Main Form ---
 $Global:mainForm = New-Object System.Windows.Forms.Form
-$Global:mainForm.Text = "SignalRGB Effect Installer"
+$Global:mainForm.Text = "SRGB Effect Installer"
 $Global:mainForm.Size = New-Object System.Drawing.Size(650, 500) # Increased width from 640
 $Global:mainForm.FormBorderStyle = 'FixedSingle'
 $Global:mainForm.MaximizeBox = $false
@@ -920,7 +996,7 @@ $fileInputLayout = New-Object System.Windows.Forms.TableLayoutPanel
 $fileInputLayout.Dock = 'Fill'
 $fileInputLayout.AutoSize = $true
 $fileInputLayout.ColumnCount = 3
-$fileInputLayout.RowCount = 2
+$fileInputLayout.RowCount = 3
 $fileInputLayout.ColumnStyles.Add((New-Object System.Windows.Forms.ColumnStyle([System.Windows.Forms.SizeType]::AutoSize))) | Out-Null
 $fileInputLayout.ColumnStyles.Add((New-Object System.Windows.Forms.ColumnStyle([System.Windows.Forms.SizeType]::Percent, 100))) | Out-Null
 $fileInputLayout.ColumnStyles.Add((New-Object System.Windows.Forms.ColumnStyle([System.Windows.Forms.SizeType]::Absolute, 95))) | Out-Null # Increased from 85
@@ -954,6 +1030,29 @@ $lblHint.Margin = [System.Windows.Forms.Padding]::new(0, 0, 0, 5)
 $fileInputLayout.Controls.Add($lblHint, 1, 1) # Span 2
 $fileInputLayout.SetColumnSpan($lblHint, 2)
 
+# --- NEW: Add LinkLabel for Effect Builder ---
+$lnkBuilder = New-Object System.Windows.Forms.LinkLabel
+$lnkBuilder.Text = "Create your own effects with the Effect Builder"
+# Link starts at char 32 ("Effect Builder"), length 14
+$lnkBuilder.Links.Add(32, 14, "https://effectbuilder.github.io/") | Out-Null 
+$lnkBuilder.Dock = 'Fill'
+$lnkBuilder.TextAlign = 'MiddleLeft'
+$lnkBuilder.Margin = [System.Windows.Forms.Padding]::new(0, 0, 0, 5)
+$fileInputLayout.Controls.Add($lnkBuilder, 1, 2) # Add to new row 2
+$fileInputLayout.SetColumnSpan($lnkBuilder, 2)
+
+$lnkBuilder.Add_LinkClicked({
+    param($sender, $e)
+    try {
+        [System.Diagnostics.Process]::Start($e.Link.LinkData)
+        $e.Link.Visited = $true
+    } catch {
+        Log-Status "ERROR: Could not open URL: $($e.Link.LinkData)"
+    }
+})
+# --- End of NEW LinkLabel ---
+
+
 # --- Row 2: Buttons ---
 $buttonLayout = New-Object System.Windows.Forms.TableLayoutPanel
 $buttonLayout.Dock = 'Fill'
@@ -981,11 +1080,13 @@ $btnUninstall.Anchor = 'Top, Left, Right' # Added Anchor
 $btnUninstall.Height = 30 # Reduced height
 $buttonLayout.Controls.Add($btnUninstall, 1, 0)
 
-# Spacer
-$pnlSpacer = New-Object System.Windows.Forms.Panel
-$pnlSpacer.Dock = 'Fill'
-$pnlSpacer.Height = 30 # Added this line to fix row height
-$buttonLayout.Controls.Add($pnlSpacer, 2, 0)
+# --- NEW: Disclaimer Button ---
+$btnDisclaimer = New-Object System.Windows.Forms.Button
+$btnDisclaimer.Text = "Disclaimer..."
+$btnDisclaimer.Dock = 'None'
+$btnDisclaimer.Anchor = 'Top, Left, Right'
+$btnDisclaimer.Height = 30
+$buttonLayout.Controls.Add($btnDisclaimer, 2, 0)
 
 # --- Row 3: Status Box ---
 $script:txtStatus = New-Object System.Windows.Forms.TextBox
@@ -1128,6 +1229,11 @@ $btnUninstall.Add_Click({
         Log-Status "ERROR: Could not get effects directory for uninstaller. $($_.Exception.Message)"
         [System.Windows.Forms.MessageBox]::Show("Could not find the SignalRGB Effects directory.`nHave you run SignalRGB at least once?", "Error", "OK", "Error") | Out-Null
     }
+})
+
+# --- NEW: Disclaimer Button Event Handler ---
+$btnDisclaimer.Add_Click({
+    Show-DisclaimerWindow
 })
 
 # --- Show the Form ---
