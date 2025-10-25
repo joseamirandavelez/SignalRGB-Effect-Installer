@@ -59,8 +59,8 @@ try {
     # Define shortcut paths
     $desktopPath = [Environment]::GetFolderPath("Desktop")
     $startMenuPath = [Environment]::GetFolderPath("Programs")
-    $Global:DesktopShortcutPath = Join-Path -Path $desktopPath -ChildPath "SRGB Effect Installer.lnk"
-    $Global:StartMenuShortcutPath = Join-Path -Path $startMenuPath -ChildPath "SRGB Tools\SRGB Effect Installer.lnk"
+    $Global:DesktopShortcutPath = Join-Path -Path $desktopPath -ChildPath "Effect Installer.lnk"
+    $Global:StartMenuShortcutPath = Join-Path -Path $startMenuPath -ChildPath "SignalRGB Tools\Effect Installer.lnk"
     
 } catch {
     [System.Windows.Forms.MessageBox]::Show("CRITICAL ERROR: Could not determine script's own path. Shortcuts will fail. `n$($_.Exception.Message)", "Error", "OK", "Error")
@@ -88,7 +88,10 @@ function Log-Status {
     
     # This function assumes $txtStatus (the log box) is available in a scope it can access.
     # In PowerShell Forms, this usually works if the function is defined before the form is shown.
-    if ($script:txtStatus) {
+    
+    # --- FIX: Added $script:txtStatus.IsHandleCreated check ---
+    # This prevents a crash if Log-Status is called before the window is fully initialized.
+    if ($script:txtStatus -and $script:txtStatus.IsHandleCreated) {
         $timestamp = Get-Date -Format "HH:mm:ss"
         $formattedMessage = "$timestamp - $Type - $Message`r`n"
         
@@ -143,7 +146,7 @@ function Show-CreateShortcutWindow {
     $layout.Controls.Add($chkDesktop, 0, 1)
 
     $chkStartMenu = New-Object System.Windows.Forms.CheckBox
-    $chkStartMenu.Text = "In the Start Menu (under SRGB Tools')"
+    $chkStartMenu.Text = "In the Start Menu (under 'SignalRGB Tools')"
     $chkStartMenu.Checked = $CheckStartMenu
     $chkStartMenu.Dock = 'Fill'
     $layout.Controls.Add($chkStartMenu, 0, 2)
@@ -475,39 +478,64 @@ function Show-ConflictDialog {
         [string]$Message
     )
     
-    # This custom dialog is necessary because MessageBox doesn't support 3 custom buttons.
+    # --- FIX: Rebuilt this function with TableLayoutPanel ---
     $dialog = New-Object System.Windows.Forms.Form
     $dialog.Text = "Conflict Detected"
-    $dialog.Size = New-Object System.Drawing.Size(400, 150)
+    $dialog.Size = New-Object System.Drawing.Size(400, 170) # Increased height
     $dialog.FormBorderStyle = 'FixedDialog'
     $dialog.MaximizeBox = $false
     $dialog.MinimizeBox = $false
     $dialog.StartPosition = 'CenterParent'
     if ($Global:mainForm.Icon) { $dialog.Icon = $Global:mainForm.Icon }
     
+    $mainLayout = New-Object System.Windows.Forms.TableLayoutPanel
+    $mainLayout.Dock = 'Fill'
+    $mainLayout.Padding = 10
+    $mainLayout.ColumnCount = 1
+    $mainLayout.RowCount = 2
+    $mainLayout.RowStyles.Add((New-Object System.Windows.Forms.RowStyle([System.Windows.Forms.SizeType]::Percent, 100))) | Out-Null
+    $mainLayout.RowStyles.Add((New-Object System.Windows.Forms.RowStyle([System.Windows.Forms.SizeType]::AutoSize))) | Out-Null
+    $dialog.Controls.Add($mainLayout)
+
     $lblMessage = New-Object System.Windows.Forms.Label
     $lblMessage.Text = $Message
     $lblMessage.Dock = 'Fill'
     $lblMessage.TextAlign = 'MiddleCenter'
-    $dialog.Controls.Add($lblMessage)
+    $mainLayout.Controls.Add($lblMessage, 0, 0)
+
+    $buttonLayout = New-Object System.Windows.Forms.TableLayoutPanel
+    $buttonLayout.Dock = 'Fill'
+    $buttonLayout.AutoSize = $true
+    $buttonLayout.ColumnCount = 3
+    $buttonLayout.RowCount = 1
+    $buttonLayout.ColumnStyles.Add((New-Object System.Windows.Forms.ColumnStyle([System.Windows.Forms.SizeType]::Percent, 33.3))) | Out-Null
+    $buttonLayout.ColumnStyles.Add((New-Object System.Windows.Forms.ColumnStyle([System.Windows.Forms.SizeType]::Percent, 33.3))) | Out-Null
+    $buttonLayout.ColumnStyles.Add((New-Object System.Windows.Forms.ColumnStyle([System.Windows.Forms.SizeType]::Percent, 33.3))) | Out-Null
+    $mainLayout.Controls.Add($buttonLayout, 0, 1)
 
     $btnOverwrite = New-Object System.Windows.Forms.Button
     $btnOverwrite.Text = "Overwrite"
     $btnOverwrite.DialogResult = 'OK'
-    $btnOverwrite.Location = New-Object System.Drawing.Point(30, 80)
-    $dialog.Controls.Add($btnOverwrite)
+    $btnOverwrite.Dock = 'None'
+    $btnOverwrite.Anchor = 'Top, Left, Right'
+    $btnOverwrite.Height = 30
+    $buttonLayout.Controls.Add($btnOverwrite, 0, 0)
     
     $btnRename = New-Object System.Windows.Forms.Button
     $btnRename.Text = "Rename"
     $btnRename.DialogResult = 'Retry'
-    $btnRename.Location = New-Object System.Drawing.Point(150, 80)
-    $dialog.Controls.Add($btnRename)
+    $btnRename.Dock = 'None'
+    $btnRename.Anchor = 'Top, Left, Right'
+    $btnRename.Height = 30
+    $buttonLayout.Controls.Add($btnRename, 1, 0)
 
     $btnCancel = New-Object System.Windows.Forms.Button
     $btnCancel.Text = "Cancel"
     $btnCancel.DialogResult = 'Cancel'
-    $btnCancel.Location = New-Object System.Drawing.Point(270, 80)
-    $dialog.Controls.Add($btnCancel)
+    $btnCancel.Dock = 'None'
+    $btnCancel.Anchor = 'Top, Left, Right'
+    $btnCancel.Height = 30
+    $buttonLayout.Controls.Add($btnCancel, 2, 0)
 
     $result = $dialog.ShowDialog($Global:mainForm)
     $dialog.Dispose()
@@ -644,7 +672,7 @@ function Show-DisclaimerWindow {
     
     # Define the disclaimer text
     $disclaimerText = @"
-SRGB Effect Installer - Terms of Use
+SignalRGB Effect Installer - Terms of Use
 
 1. No Warranty
 This Tool is provided "as-is", without any warranties of any kind, express or implied. The developer makes no guarantees regarding its functionality, reliability, or suitability for any particular purpose.
@@ -945,7 +973,7 @@ function Start-Installation {
 
 # --- Main Form ---
 $Global:mainForm = New-Object System.Windows.Forms.Form
-$Global:mainForm.Text = "SRGB Effect Installer"
+$Global:mainForm.Text = "SignalRGB Effect Installer"
 $Global:mainForm.Size = New-Object System.Drawing.Size(650, 500) # Increased width from 640
 $Global:mainForm.FormBorderStyle = 'FixedSingle'
 $Global:mainForm.MaximizeBox = $false
@@ -1099,8 +1127,10 @@ $mainLayout.Controls.Add($script:txtStatus, 0, 3)
 
 # --- Form and Control Event Handlers ---
 
-# Form Load
-$Global:mainForm.Add_Load({
+# --- FIX: Changed from Add_Load to Add_Shown ---
+# Add_Shown fires *after* the form is visible and the handle is created,
+# preventing the BeginInvoke error.
+$Global:mainForm.Add_Shown({
     Log-Status "Application started."
     Log-Status "Looking for resources in: $Global:ScriptDirectory"
     
