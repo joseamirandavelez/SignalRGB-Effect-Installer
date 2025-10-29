@@ -20,37 +20,14 @@ catch {}
     Manages folder creation, conflict detection (file and <title> tag),
     overwrite/rename logic, and app restart.
     Includes an uninstaller and shortcut creation.
-
-.DESCRIPTION
-    This script provides a user-friendly graphical interface for
-    installing custom effects into SignalRGB.
-
-    Features:
-    - GUI: A simple, clean interface.
-    - Drag and Drop: Drop files directly onto the file box.
-    - File Types: Supports .html, .png, and .zip files.
-    - Conflict Resolution:
-        - Checks if the destination folder exists.
-        - Checks if any existing effect uses the same <title> tag.
-        - Prompts user to Overwrite, Rename, or Cancel.
-    - Rename Logic: Renames the folder, .html, .png, and the <title> tag inside the .html file.
-    - Uninstaller: A separate window to view and delete installed effects.
-    - Auto-Restart: Kills the SignalRGB process to force a refresh.
-    - Auto-Shortcut: Prompts user to create shortcuts if they don't exist.
-    - Logo/Icon: Loads local logo.png and icon.ico from the script's directory.
 #>
-
-# --- Self-Elevation block removed ---
-# We no longer force administrator privileges.
-# This will allow drag-and-drop to function correctly.
-# The only side-effect is that stopping the SignalRGB process
-# might fail if it is running with higher privileges.
 
 # --- Script-Wide Variables ---
 $Global:ScriptDirectory = $null
 $Global:ScriptFullPath = $null
 $Global:DesktopShortcutPath = $null
 $Global:StartMenuShortcutPath = $null
+$Global:SendToShortcutPath = $null
 
 try {
     # Set global paths. This is more reliable than $PSScriptRoot
@@ -60,13 +37,15 @@ try {
     # Define shortcut paths
     $desktopPath = [Environment]::GetFolderPath("Desktop")
     $startMenuPath = [Environment]::GetFolderPath("Programs")
+    $sendToPath = Join-Path -Path ([Environment]::GetFolderPath("ApplicationData")) -ChildPath "Microsoft\Windows\SendTo"
+
     $Global:DesktopShortcutPath = Join-Path -Path $desktopPath -ChildPath "Effect Installer.lnk"
     $Global:StartMenuShortcutPath = Join-Path -Path $startMenuPath -ChildPath "SignalRGB Tools\Effect Installer.lnk"
-    
+    $Global:SendToShortcutPath = Join-Path -Path $sendToPath -ChildPath "SignalRGB Installer.lnk"
+
 }
 catch {
     [System.Windows.Forms.MessageBox]::Show("CRITICAL ERROR: Could not determine script's own path. Shortcuts will fail. `n$($_.Exception.Message)", "Error", "OK", "Error")
-    # Exit if we can't even find our own path
     return
 }
 
@@ -74,26 +53,21 @@ catch {
 $RegKey = "HKCU:\Software\WhirlwindFX\SignalRgb"
 $RegValue = "UserDirectory"
 $AppName = "SignalRGB"
-$AppExe = "SignalRGB.exe"
 $EffectsSubFolder = "Effects" # The subfolder inside UserDirectory
 
 # --- Load Remaining Assemblies ---
 Add-Type -AssemblyName System.IO.Compression.FileSystem
 
-# --- Helper Functions ---
+# --- Helper Functions (Ensuring all are defined before first call) ---
 
-function Log-Status {
+function Write-Status {
     param (
         [string]$Message,
         [string]$Type = "INFO"
     )
     
-    # This function assumes $txtStatus (the log box) is available in a scope it can access.
-    # In PowerShell Forms, this usually works if the function is defined before the form is shown.
-    
-    # --- FIX: Added $script:txtStatus.IsHandleCreated check ---
-    # This prevents a crash if Log-Status is called before the window is fully initialized.
-    if ($script:txtStatus -and $script:txtStatus.IsHandleCreated) {
+    # Check if the global variable is a Forms control and has a created handle
+    if ($script:txtStatus -is [System.Windows.Forms.TextBox] -and $script:txtStatus.IsHandleCreated) {
         $timestamp = Get-Date -Format "HH:mm:ss"
         $formattedMessage = "$timestamp - $Type - $Message`r`n"
         
@@ -105,8 +79,66 @@ function Log-Status {
             }, $formattedMessage)
     }
     else {
+        # Fallback for headless mode
         Write-Host "${Type}: $Message"
     }
+}
+
+function Set-OpenWithRegistryKeys {
+    param (
+        [string]$AppName,
+        [string]$AppPath,
+        [string[]]$FileExtensions
+    )
+    
+    # 1. Register the application itself under App Paths
+    $appExeName = "$($AppName).exe"
+    $appKeyPath = "HKCU:\Software\Microsoft\Windows\CurrentVersion\App Paths\$appExeName"
+    Write-Status "Registering app path for Open With..."
+    
+    try {
+        # FIX: Ensure we create the App Paths key
+        New-Item -Path $appKeyPath -Force -ErrorAction Stop | Out-Null
+        
+        # Point the default value to the PowerShell executable
+        Set-ItemProperty -Path $appKeyPath -Name "(Default)" -Value "C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe" -Type String -Force
+
+        # Set the 'Path' property to define the command line arguments
+        Set-ItemProperty -Path $appKeyPath -Name "Path" -Value "powershell.exe -WindowStyle Hidden -ExecutionPolicy Bypass -File `"$AppPath`"" -Type String -Force | Out-Null
+        Write-Status "App Path created: $appExeName"
+    }
+    catch {
+        Write-Status "ERROR setting App Path registry key: $($_.Exception.Message)"
+        return $false
+    }
+
+    # 2. Link file extensions to the registered app
+    Write-Status "Linking extensions ($($FileExtensions -join ', ')) to the app..."
+    
+    foreach ($ext in $FileExtensions) {
+        $extKeyPath = "HKCU:\Software\Classes\$ext\OpenWithList"
+        try {
+            # Ensure OpenWithList key exists for the extension
+            if (-not (Test-Path -Path $extKeyPath)) {
+                New-Item -Path $extKeyPath -Force | Out-Null
+            }
+            
+            # Add the app name to the OpenWithList
+            Set-ItemProperty -Path $extKeyPath -Name "$appExeName" -Value "" -Type String -Force -ErrorAction Stop | Out-Null
+            
+            # CRITICAL FIX for Windows 11: Set the association in the subkey directly
+            # This often forces the association to appear immediately.
+            $assocKeyPath = "HKCU:\Software\Microsoft\Windows\CurrentVersion\ApplicationAssociationToasts"
+            New-ItemProperty -Path $assocKeyPath -Name "$appExeName$ext" -Value "Application" -Type String -Force | Out-Null
+            
+            Write-Status "Added $appExeName to Open With for ${ext}"
+        }
+        catch {
+            # FIX: Using ${ext} to resolve parser confusion near the colon.
+            Write-Status "WARNING: Could not link Open With for ${ext}: $($_.Exception.Message)"
+        }
+    }
+    return $true
 }
 
 function Show-CreateShortcutWindow {
@@ -114,55 +146,74 @@ function Show-CreateShortcutWindow {
         [string]$ScriptDirectory,
         [string]$IconPath,
         [bool]$CheckDesktop = $true,
-        [bool]$CheckStartMenu = $true
+        [bool]$CheckStartMenu = $true,
+        [bool]$CheckSendTo = $true,
+        [bool]$CheckOpenWith = $true
     )
 
     $shortcutForm = New-Object System.Windows.Forms.Form
     $shortcutForm.Text = "Create Shortcuts"
-    $shortcutForm.Size = New-Object System.Drawing.Size(350, 200)
+    $shortcutForm.Size = New-Object System.Drawing.Size(350, 260) # Set height for 4 options + button
     $shortcutForm.FormBorderStyle = 'FixedDialog'
     $shortcutForm.MaximizeBox = $false
     $shortcutForm.MinimizeBox = $false
     $shortcutForm.StartPosition = 'CenterParent'
-    if ($Global:mainForm.Icon) { $shortcutForm.Icon = $Global:mainForm.Icon }
+    if ($Global:mainForm -and $Global:mainForm.Icon) { $shortcutForm.Icon = $Global:mainForm.Icon }
 
     $layout = New-Object System.Windows.Forms.TableLayoutPanel
     $layout.Dock = 'Fill'
     $layout.Padding = 10
     $layout.ColumnCount = 1
-    $layout.RowCount = 4
-    $layout.RowStyles.Add((New-Object System.Windows.Forms.RowStyle([System.Windows.Forms.SizeType]::AutoSize))) | Out-Null
-    $layout.RowStyles.Add((New-Object System.Windows.Forms.RowStyle([System.Windows.Forms.SizeType]::AutoSize))) | Out-Null
-    $layout.RowStyles.Add((New-Object System.Windows.Forms.RowStyle([System.Windows.Forms.SizeType]::AutoSize))) | Out-Null
-    $layout.RowStyles.Add((New-Object System.Windows.Forms.RowStyle([System.Windows.Forms.SizeType]::Percent, 100))) | Out-Null # Spacer
+    # Total of 6 rows: Label (0) + 4 Checkboxes (1-4) + Button (5)
+    $layout.RowCount = 6 
+    $layout.RowStyles.Add((New-Object System.Windows.Forms.RowStyle([System.Windows.Forms.SizeType]::AutoSize))) | Out-Null # 0: Label
+    $layout.RowStyles.Add((New-Object System.Windows.Forms.RowStyle([System.Windows.Forms.SizeType]::AutoSize))) | Out-Null # 1: Desktop
+    $layout.RowStyles.Add((New-Object System.Windows.Forms.RowStyle([System.Windows.Forms.SizeType]::AutoSize))) | Out-Null # 2: Start Menu
+    $layout.RowStyles.Add((New-Object System.Windows.Forms.RowStyle([System.Windows.Forms.SizeType]::AutoSize))) | Out-Null # 3: Send To
+    $layout.RowStyles.Add((New-Object System.Windows.Forms.RowStyle([System.Windows.Forms.SizeType]::AutoSize))) | Out-Null # 4: Open With
+    $layout.RowStyles.Add((New-Object System.Windows.Forms.RowStyle([System.Windows.Forms.SizeType]::Percent, 100))) | Out-Null # 5: Button/Spacer
     $shortcutForm.Controls.Add($layout)
 
     $lblInfo = New-Object System.Windows.Forms.Label
-    $lblInfo.Text = "Create shortcuts for the Effect Installer:"
+    $lblInfo.Text = "Create shortcuts and registry keys for the Effect Installer:"
     $lblInfo.Dock = 'Fill'
-    $layout.Controls.Add($lblInfo, 0, 0)
+    $layout.Controls.Add($lblInfo, 0, 0) # Row 0
 
     $chkDesktop = New-Object System.Windows.Forms.CheckBox
     $chkDesktop.Text = "On the Desktop"
     $chkDesktop.Checked = $CheckDesktop
     $chkDesktop.Dock = 'Fill'
-    $layout.Controls.Add($chkDesktop, 0, 1)
+    $layout.Controls.Add($chkDesktop, 0, 1) # Row 1
 
     $chkStartMenu = New-Object System.Windows.Forms.CheckBox
     $chkStartMenu.Text = "In the Start Menu (under 'SignalRGB Tools')"
     $chkStartMenu.Checked = $CheckStartMenu
     $chkStartMenu.Dock = 'Fill'
-    $layout.Controls.Add($chkStartMenu, 0, 2)
+    $layout.Controls.Add($chkStartMenu, 0, 2) # Row 2
+
+    $chkSendTo = New-Object System.Windows.Forms.CheckBox
+    $chkSendTo.Text = "In the 'Send To' menu (for quick installs)"
+    $chkSendTo.Checked = $CheckSendTo
+    $chkSendTo.Dock = 'Fill'
+    $layout.Controls.Add($chkSendTo, 0, 3) # Row 3
+
+    $chkOpenWith = New-Object System.Windows.Forms.CheckBox
+    $chkOpenWith.Text = "Add to 'Open with' context menu"
+    $chkOpenWith.Checked = $CheckOpenWith
+    $chkOpenWith.Dock = 'Fill'
+    $layout.Controls.Add($chkOpenWith, 0, 4) # Row 4
 
     $btnCreate = New-Object System.Windows.Forms.Button
     $btnCreate.Text = "Create"
+    $btnCreate.DialogResult = [System.Windows.Forms.DialogResult]::OK # Set DialogResult for clean closing
     $btnCreate.Dock = 'Fill'
     $btnCreate.Anchor = 'Top'
     $btnCreate.Height = 30
     $btnCreate.Margin = [System.Windows.Forms.Padding]::new(0, 10, 0, 0)
-    $layout.Controls.Add($btnCreate, 0, 3)
+    $layout.Controls.Add($btnCreate, 0, 5) # Row 5
 
     $btnCreate.Add_Click({
+            # The execution of this script block performs the action and then closes the dialog
             try {
                 # WScript.Shell is the object that creates shortcuts
                 $wsShell = New-Object -ComObject WScript.Shell
@@ -172,7 +223,7 @@ function Show-CreateShortcutWindow {
 
                 if ($chkDesktop.Checked) {
                     try {
-                        Log-Status "Creating Desktop shortcut..."
+                        Write-Status "Creating Desktop shortcut..."
                         $shortcut = $wsShell.CreateShortcut($Global:DesktopShortcutPath)
                         $shortcut.TargetPath = $targetFile
                         $shortcut.Arguments = $arguments
@@ -181,22 +232,20 @@ function Show-CreateShortcutWindow {
                             $shortcut.IconLocation = $IconPath
                         }
                         $shortcut.Save()
-                        Log-Status "Desktop shortcut created."
+                        Write-Status "Desktop shortcut created."
                     }
                     catch {
-                        Log-Status "ERROR creating Desktop shortcut: $($_.Exception.Message)"
+                        Write-Status "ERROR creating Desktop shortcut: $($_.Exception.Message)"
                     }
                 }
             
                 if ($chkStartMenu.Checked) {
                     try {
-                        Log-Status "Creating Start Menu shortcut..."
-                        # Ensure the folder exists
+                        Write-Status "Creating Start Menu shortcut..."
                         $startMenuFolder = Split-Path -Path $Global:StartMenuShortcutPath -Parent
                         if (-not (Test-Path -Path $startMenuFolder)) {
                             New-Item -Path $startMenuFolder -ItemType Directory -Force | Out-Null
                         }
-                    
                         $shortcut = $wsShell.CreateShortcut($Global:StartMenuShortcutPath)
                         $shortcut.TargetPath = $targetFile
                         $shortcut.Arguments = $arguments
@@ -205,20 +254,44 @@ function Show-CreateShortcutWindow {
                             $shortcut.IconLocation = $IconPath
                         }
                         $shortcut.Save()
-                        Log-Status "Start Menu shortcut created."
+                        Write-Status "Start Menu shortcut created."
                     }
                     catch {
-                        Log-Status "ERROR creating Start Menu shortcut: $($_.Exception.Message)"
+                        Write-Status "ERROR creating Start Menu shortcut: $($_.Exception.Message)"
                     }
                 }
-                $shortcutForm.Close()
+
+                if ($chkSendTo.Checked) {
+                    try {
+                        Write-Status "Creating 'Send To' shortcut..."
+                        $shortcut = $wsShell.CreateShortcut($Global:SendToShortcutPath)
+                        $shortcut.TargetPath = $targetFile
+                        $shortcut.Arguments = $arguments
+                        $shortcut.WorkingDirectory = $Global:ScriptDirectory
+                        if (Test-Path -Path $IconPath) {
+                            $shortcut.IconLocation = $IconPath
+                        }
+                        $shortcut.Save()
+                        Write-Status "'Send To' shortcut created: $($Global:SendToShortcutPath)"
+                    }
+                    catch {
+                        Write-Status "ERROR creating 'Send To' shortcut: $($_.Exception.Message)"
+                    }
+                }
+                
+                if ($chkOpenWith.Checked) {
+                    Set-OpenWithRegistryKeys -AppName "SignalRGB Installer" -AppPath $Global:ScriptFullPath -FileExtensions @(".zip", ".html")
+                }
+            
+                # Dialog will close cleanly because DialogResult is set on the button
             }
             catch {
-                Log-Status "ERROR: Could not create shortcuts. $($_.Exception.Message)"
-                [System.Windows.Forms.MessageBox]::Show("Error creating shortcut: $($_.Exception.Message)", "Error", "OK", "Error") | Out-Null
+                Write-Status "CRITICAL ERROR in shortcut creation click handler: $($_.Exception.Message)"
+                [System.Windows.Forms.MessageBox]::Show("A critical error occurred while executing the creation script: $($_.Exception.Message)", "Fatal Error", "OK", "Error") | Out-Null
             }
         })
 
+    # ShowDialog returns the DialogResult of the button that closed it.
     $shortcutForm.ShowDialog($Global:mainForm) | Out-Null
     $shortcutForm.Dispose()
 }
@@ -236,7 +309,7 @@ function Show-UninstallWindow {
     $uninstallForm.MaximizeBox = $true
     $uninstallForm.MinimizeBox = $true
     $uninstallForm.StartPosition = 'CenterParent'
-    if ($Global:mainForm.Icon) { $uninstallForm.Icon = $Global:mainForm.Icon }
+    if ($Global:mainForm -and $Global:mainForm.Icon) { $uninstallForm.Icon = $Global:mainForm.Icon }
 
     $layout = New-Object System.Windows.Forms.TableLayoutPanel
     $layout.Dock = 'Fill'
@@ -286,9 +359,9 @@ function Show-UninstallWindow {
     # --- Functions for this window ---
     $populateList = {
         $clbEffects.Items.Clear()
-        Log-Status "Refreshing effect list from: $EffectsBasePath"
+        Write-Status "Refreshing effect list from: $EffectsBasePath"
         if (-not (Test-Path -Path $EffectsBasePath)) {
-            Log-Status "Effects folder does not exist. Nothing to list."
+            Write-Status "Effects folder does not exist. Nothing to list."
             return
         }
         
@@ -308,10 +381,10 @@ function Show-UninstallWindow {
             foreach ($folderName in $uniqueFolders) {
                 $clbEffects.Items.Add($folderName, $false) | Out-Null
             }
-            Log-Status "Found $($uniqueFolders.Count) effects."
+            Write-Status "Found $($uniqueFolders.Count) effects."
         }
         catch {
-            Log-Status "ERROR scanning for effects: $($_.Exception.Message)"
+            Write-Status "ERROR scanning for effects: $($_.Exception.Message)"
         }
     }
 
@@ -335,7 +408,7 @@ function Show-UninstallWindow {
                 $currentAlwaysTitle = (Get-ItemProperty -Path "HKCU:\Software\WhirlwindFX\SignalRgb\effects\selected" -Name "always" -ErrorAction SilentlyContinue).always
             }
             catch {
-                Log-Status "Could not read current 'always' key. Will not update registry on delete."
+                Write-Status "Could not read current 'always' key. Will not update registry on delete."
             }
 
             if (-not [string]::IsNullOrWhiteSpace($currentAlwaysTitle)) {
@@ -354,18 +427,18 @@ function Show-UninstallWindow {
             $activeEffectFolderWasDeleted = $false
             if ($currentAlwaysFolder -and $selectedItems -contains $currentAlwaysFolder) {
                 $activeEffectFolderWasDeleted = $true
-                Log-Status "Active effect '$currentAlwaysTitle' is scheduled for deletion."
+                Write-Status "Active effect '$currentAlwaysTitle' is scheduled for deletion."
             }
             # --- End new logic block ---
 
             # --- MOVED: Set new active effect *before* deleting files ---
             if ($activeEffectFolderWasDeleted) {
-                Log-Status "Updating active effect registry keys..."
+                Write-Status "Updating active effect registry keys..."
                 $remainingEffectFolders = @($originalEffectFolders | Where-Object { $_ -notin $selectedItems })
             
                 if ($remainingEffectFolders.Count -eq 0) {
                     # No effects left, set to empty
-                    Log-Status "All effects deleted. Setting active effect to empty."
+                    Write-Status "All effects deleted. Setting active effect to empty."
                     Set-ActiveEffectRegistryKeys -NewEffectTitle ""
                 }
                 else {
@@ -388,7 +461,7 @@ function Show-UninstallWindow {
                     $newEffectHtmlPath = Join-Path -Path $EffectsBasePath -ChildPath "$newEffectFolder\$newEffectFolder.html"
                     $newEffectTitle = Get-EffectTitleFromHtml -HtmlFilePath $newEffectHtmlPath
                 
-                    Log-Status "Setting new active effect to: '$newEffectTitle'"
+                    Write-Status "Setting new active effect to: '$newEffectTitle'"
                     Set-ActiveEffectRegistryKeys -NewEffectTitle $newEffectTitle
                 }
             }
@@ -396,7 +469,7 @@ function Show-UninstallWindow {
 
             foreach ($itemName in $selectedItems) {
                 $effectFolder = Join-Path -Path $EffectsBasePath -ChildPath $itemName
-                Log-Status "Deleting effect: $itemName"
+                Write-Status "Deleting effect: $itemName"
                 try {
                     # Find all html and png files in that folder
                     # Fix: Ensure $filesToDelete is always an array by using @()
@@ -404,27 +477,27 @@ function Show-UninstallWindow {
                     $filesToDelete += @(Get-ChildItem -Path $effectFolder -Filter "*.png")
 
                     foreach ($file in $filesToDelete) {
-                        Log-Status "Deleting file: $($file.Name)"
+                        Write-Status "Deleting file: $($file.Name)"
                         Remove-Item -Path $file.FullName -Force
                     }
                 
                     # Check if folder is now empty
                     if ((Get-ChildItem -Path $effectFolder -Force | Measure-Object).Count -eq 0) {
-                        Log-Status "Folder '$itemName' is empty, deleting it."
+                        Write-Status "Folder '$itemName' is empty, deleting it."
                         Remove-Item -Path $effectFolder -Recurse -Force
                     }
                     else {
-                        Log-Status "Folder '$itemName' is not empty, will not delete folder."
+                        Write-Status "Folder '$itemName' is not empty, will not delete folder."
                     }
-                    Log-Status "Successfully deleted effect '$itemName'."
+                    Write-Status "Successfully deleted effect '$itemName'."
                 }
                 catch {
-                    Log-Status "ERROR deleting '$itemName': $($_.Exception.Message)"
+                    Write-Status "ERROR deleting '$itemName': $($_.Exception.Message)"
                     [System.Windows.Forms.MessageBox]::Show("Error deleting '$itemName':`n$($_.Exception.Message)", "Error", "OK", "Error") | Out-Null
                 }
             }
         
-            Log-Status "Deletion complete."
+            Write-Status "Deletion complete."
         
             # Refresh the list
             Invoke-Command $populateList
@@ -454,12 +527,12 @@ function Get-EffectTitleFromHtml {
             return $match.Groups[1].Value.Trim()
         }
         else {
-            Log-Status "WARNING: Could not find <title> tag in $HtmlFilePath. Using filename as fallback."
+            Write-Status "WARNING: Could not find <title> tag in $HtmlFilePath. Using filename as fallback."
             return $fallbackTitle
         }
     }
     catch {
-        Log-Status "ERROR: Could not read $HtmlFilePath to find title. Using filename as fallback. $($_.Exception.Message)"
+        Write-Status "ERROR: Could not read $HtmlFilePath to find title. Using filename as fallback. $($_.Exception.Message)"
         return $fallbackTitle
     }
 }
@@ -499,7 +572,7 @@ function Show-ConflictDialog {
     $dialog.MaximizeBox = $false
     $dialog.MinimizeBox = $false
     $dialog.StartPosition = 'CenterParent'
-    if ($Global:mainForm.Icon) { $dialog.Icon = $Global:mainForm.Icon }
+    if ($Global:mainForm -and $Global:mainForm.Icon) { $dialog.Icon = $Global:mainForm.Icon }
     
     $mainLayout = New-Object System.Windows.Forms.TableLayoutPanel
     $mainLayout.Dock = 'Fill'
@@ -571,7 +644,7 @@ function Show-RenameDialog {
     $dialog.MaximizeBox = $false
     $dialog.MinimizeBox = $false
     $dialog.StartPosition = 'CenterParent'
-    if ($Global:mainForm.Icon) { $dialog.Icon = $Global:mainForm.Icon }
+    if ($Global:mainForm -and $Global:mainForm.Icon) { $dialog.Icon = $Global:mainForm.Icon }
 
     $lblInfo = New-Object System.Windows.Forms.Label
     $lblInfo.Text = "Enter a new name for the effect:"
@@ -610,7 +683,7 @@ function Show-RenameDialog {
         $dialog.Dispose()
         
         if ([string]::IsNullOrWhiteSpace($sanitizedName)) {
-            Log-Status "ERROR: New name is invalid or empty."
+            Write-Status "ERROR: New name is invalid or empty."
             return $null
         }
         return $sanitizedName
@@ -633,16 +706,16 @@ function Set-EffectTitleInHtml {
         if ($regex.IsMatch($content)) {
             $newContent = $regex.Replace($content, ('$1' + $NewTitle + '$3'), 1)
             Set-Content -Path $HtmlFilePath -Value $newContent -Encoding UTF8
-            Log-Status "Successfully updated <title> in $HtmlFilePath to '$NewTitle'."
+            Write-Status "Successfully updated <title> in $HtmlFilePath to '$NewTitle'."
             return $true
         }
         else {
-            Log-Status "WARNING: Could not find <title> tag in $HtmlFilePath to update it."
+            Write-Status "WARNING: Could not find <title> tag in $HtmlFilePath to update it."
             return $false
         }
     }
     catch {
-        Log-Status "ERROR: Could not read or write to $HtmlFilePath to update title. $($_.Exception.Message)"
+        Write-Status "ERROR: Could not read or write to $HtmlFilePath to update title. $($_.Exception.Message)"
         return $false
     }
 }
@@ -653,13 +726,13 @@ function Set-ActiveEffectRegistryKeys {
     )
     
     $keyPath = "HKCU:\Software\WhirlwindFX\SignalRgb\effects\selected"
-    Log-Status "Setting active effect registry keys..."
+    Write-Status "Setting active effect registry keys..."
     
     try {
         # Ensure the path exists
         if (-not (Test-Path -Path $keyPath)) {
             New-Item -Path $keyPath -Force | Out-Null
-            Log-Status "Created registry key path: $keyPath"
+            Write-Status "Created registry key path: $keyPath"
         }
         
         # 1. Get the current 'always' value
@@ -668,19 +741,19 @@ function Set-ActiveEffectRegistryKeys {
         if ($currentAlways) {
             # 2. Set 'previous' key to the 'always' value
             Set-ItemProperty -Path $keyPath -Name "previous" -Value $currentAlways.always
-            Log-Status "Set 'previous' key to: $($currentAlways.always)"
+            Write-Status "Set 'previous' key to: $($currentAlways.always)"
         }
         else {
-            Log-Status "No existing 'always' key found. Skipping 'previous' key set."
+            Write-Status "No existing 'always' key found. Skipping 'previous' key set."
         }
         
         # 3. Set 'always' key to the new effect title
         Set-ItemProperty -Path $keyPath -Name "always" -Value $NewEffectTitle
-        Log-Status "Set 'always' key to: $NewEffectTitle"
+        Write-Status "Set 'always' key to: $NewEffectTitle"
         
     }
     catch {
-        Log-Status "ERROR: Could not update registry keys. $($_.Exception.Message)"
+        Write-Status "ERROR: Could not update registry keys. $($_.Exception.Message)"
     }
 }
 
@@ -718,7 +791,7 @@ https://github.com/joseamirandavelez/SignalRGB-Effect-Installer
     $disclaimerForm.MaximizeBox = $false
     $disclaimerForm.MinimizeBox = $false
     $disclaimerForm.StartPosition = 'CenterParent'
-    if ($Global:mainForm.Icon) { $disclaimerForm.Icon = $Global:mainForm.Icon }
+    if ($Global:mainForm -and $Global:mainForm.Icon) { $disclaimerForm.Icon = $Global:mainForm.Icon }
 
     $layout = New-Object System.Windows.Forms.TableLayoutPanel
     $layout.Dock = 'Fill'
@@ -747,13 +820,13 @@ https://github.com/joseamirandavelez/SignalRGB-Effect-Installer
     $layout.Controls.Add($btnOK, 0, 1)
 
     $rtbDisclaimer.Add_LinkClicked({
-            param($sender, $e)
+            param($s, $e) # FIX: Renamed $sender to $s
             # Open the link in the default browser
             try {
                 [System.Diagnostics.Process]::Start($e.LinkText)
             }
             catch {
-                Log-Status "ERROR: Could not open URL: $($e.LinkText)"
+                Write-Status "ERROR: Could not open URL: $($e.LinkText)"
             }
         })
 
@@ -770,27 +843,26 @@ function Start-Installation {
         [string]$FilePath
     )
     
-    Log-Status "Starting installation for: $FilePath"
+    Write-Status "Starting installation for: $FilePath"
     
     # Flag to indicate if SignalRGB must be restarted after this installation.
     # A restart is required for New Installs and Renames, but NOT for Overwrites.
     $restartRequired = $false 
     
     # 1. Get SignalRGB User Directory from Registry
-    # ... (No change in this section) ...
     $userDir = $null
     try {
-        Log-Status "Reading registry key: $RegKey"
+        Write-Status "Reading registry key: $RegKey"
         $userDir = (Get-ItemProperty -Path $RegKey -Name $RegValue).$RegValue
         if ([string]::IsNullOrWhiteSpace($userDir) -or -not (Test-Path -Path $userDir)) {
-            Log-Status "ERROR: Registry key found, but folder is invalid or missing: $userDir"
+            Write-Status "ERROR: Registry key found, but folder is invalid or missing: $userDir"
             [System.Windows.Forms.MessageBox]::Show("Error: SignalRGB UserDirectory not found or is invalid.`nChecked: $userDir", "Registry Error", "OK", "Error") | Out-Null
             return $false # Return false on failure
         }
-        Log-Status "Found folder: $userDir"
+        Write-Status "Found folder: $userDir"
     }
     catch {
-        Log-Status "ERROR: Could not read registry key: $RegKey. $($_.Exception.Message)"
+        Write-Status "ERROR: Could not read registry key: $RegKey. $($_.Exception.Message)"
         [System.Windows.Forms.MessageBox]::Show("Error: Could not read registry key for $AppName.`n$($_.Exception.Message)", "Registry Error", "OK", "Error") | Out-Null
         return $false # Return false on failure
     }
@@ -799,15 +871,14 @@ function Start-Installation {
     $installBasePath = Join-Path -Path $userDir -ChildPath $EffectsSubFolder
     
     # --- Ensure the 'Effects' folder exists ---
-    # ... (No change in this section) ...
     if (-not (Test-Path -Path $installBasePath)) {
-        Log-Status "'$EffectsSubFolder' folder not found. Creating it..."
+        Write-Status "'$EffectsSubFolder' folder not found. Creating it..."
         try {
             New-Item -Path $installBasePath -ItemType Directory -Force | Out-Null
-            Log-Status "Created folder: $installBasePath"
+            Write-Status "Created folder: $installBasePath"
         }
         catch {
-            Log-Status "ERROR: Could not create folder: $installBasePath. $($_.Exception.Message)"
+            Write-Status "ERROR: Could not create folder: $installBasePath. $($_.Exception.Message)"
             [System.Windows.Forms.MessageBox]::Show("Error: Could not create folder:`n$installBasePath", "Error", "OK", "Error") | Out-Null
             return $false # Return false on failure
         }
@@ -822,18 +893,17 @@ function Start-Installation {
     
     try {
         # 2. Prepare source files based on input (zip, html, or png)
-        # ... (No change in this section) ...
         
         if ($extension -eq ".zip") {
-            Log-Status "Zip file detected. Extracting..."
+            Write-Status "Zip file detected. Extracting..."
             $tempExtractFolder = Join-Path -Path ([System.IO.Path]::GetTempPath()) -ChildPath ([System.IO.Path]::GetRandomFileName())
             [System.IO.Compression.ZipFile]::ExtractToDirectory($FilePath, $tempExtractFolder)
-            Log-Status "Extracted to: $tempExtractFolder"
+            Write-Status "Extracted to: $tempExtractFolder"
             
             # Find the html and png files inside
             $sourceHtmlFile = (Get-ChildItem -Path $tempExtractFolder -Recurse -Filter "*.html" | Select-Object -First 1).FullName
             if (-not $sourceHtmlFile) {
-                Log-Status "ERROR: No .html file found in the zip archive."
+                Write-Status "ERROR: No .html file found in the zip archive."
                 [System.Windows.Forms.MessageBox]::Show("Error: No .html file found in the zip archive.", "Zip Error", "OK", "Error") | Out-Null
                 return $false # Return false on failure
             }
@@ -841,7 +911,7 @@ function Start-Installation {
             $effectName = [System.IO.Path]::GetFileNameWithoutExtension($sourceHtmlFile)
             $sourcePngFile = (Get-ChildItem -Path (Split-Path $sourceHtmlFile) -Filter "$effectName.png" | Select-Object -First 1).FullName
             if (-not $sourcePngFile) {
-                Log-Status "No matching .png found in zip. This might be ok."
+                Write-Status "No matching .png found in zip. This might be ok."
             }
             
         }
@@ -851,24 +921,24 @@ function Start-Installation {
             $sourcePngFile = Join-Path -Path (Split-Path $FilePath) -ChildPath "$effectName.png"
             if (-not (Test-Path -Path $sourcePngFile)) {
                 $sourcePngFile = $null # Don't try to copy a non-existent file
-                Log-Status "No matching .png found for $effectName. This might be ok."
+                Write-Status "No matching .png found for $effectName. This might be ok."
             }
             
         }
         else {
-            Log-Status "ERROR: Invalid file type. Please select a .zip or .html file."
+            Write-Status "ERROR: Invalid file type. Please select a .zip or .html file."
             [System.Windows.Forms.MessageBox]::Show("Invalid file type. Please select a .zip or .html file.", "Invalid File", "OK", "Error") | Out-Null
             return $false # Return false on failure
         }
 
         if (-not $sourceHtmlFile) {
-            Log-Status "ERROR: Could not determine source .html file."
+            Write-Status "ERROR: Could not determine source .html file."
             return $false # Return false on failure
         }
 
-        Log-Status "Effect Name (from file): $effectName"
-        Log-Status "Source HTML: $sourceHtmlFile"
-        Log-Status "Source PNG: $sourcePngFile"
+        Write-Status "Effect Name (from file): $effectName"
+        Write-Status "Source HTML: $sourceHtmlFile"
+        Write-Status "Source PNG: $sourcePngFile"
 
         # 3. Conflict Detection Loop
         $installConfirmed = $false
@@ -879,12 +949,13 @@ function Start-Installation {
         
         while (-not $installConfirmed) {
             $destFolder = Join-Path -Path $installBasePath -ChildPath $currentEffectName
-            $destHtmlFile = Join-Path -Path $destFolder -ChildPath ($currentEffectName + ".html")
-            
+            # FIX: Removed assignment to unused variable 'destHtmlFile'
+            Join-Path -Path $destFolder -ChildPath ($currentEffectName + ".html") | Out-Null
+
             # Get title from HTML
             $currentEffectTitle = Get-EffectTitleFromHtml -HtmlFilePath $currentHtmlFile
             # No fallback needed here, Get-EffectTitleFromHtml will return filename if title is missing
-            Log-Status "Effect Title (from HTML): $currentEffectTitle"
+            Write-Status "Effect Title (from HTML): $currentEffectTitle"
             
             # Check for conflicts
             $folderExists = Test-Path -Path $destFolder
@@ -897,31 +968,31 @@ function Start-Installation {
                 if ($titleConflictFile) { $conflictMessage += "- Title '$currentEffectTitle' is already used by `n  $titleConflictFile`n" }
                 $conflictMessage += "`nWould you like to Overwrite, Rename, or Cancel?"
                 
-                Log-Status "Conflict detected: $conflictMessage"
+                Write-Status "Conflict detected: $conflictMessage"
                 $userChoice = Show-ConflictDialog -Message $conflictMessage
                 
                 if ($userChoice -eq 'Overwrite') {
-                    Log-Status "User chose to Overwrite."
+                    Write-Status "User chose to Overwrite."
                     $isOverwrite = $true
                     $installConfirmed = $true
                     
                 }
                 elseif ($userChoice -eq 'Rename') {
-                    Log-Status "User chose to Rename."
+                    Write-Status "User chose to Rename."
                     $newName = Show-RenameDialog -OldName $currentEffectName
                     
                     if ([string]::IsNullOrWhiteSpace($newName)) {
-                        Log-Status "Rename cancelled by user."
+                        Write-Status "Rename cancelled by user."
                         return $false # Return false on user cancel
                     }
                     
                     if ($newName.Equals($currentEffectName, [StringComparison]::OrdinalIgnoreCase)) {
-                        Log-Status "New name is the same as the old name. No changes made."
+                        Write-Status "New name is the same as the old name. No changes made."
                         # Loop will repeat
                         continue
                     }
 
-                    Log-Status "New name selected: $newName"
+                    Write-Status "New name selected: $newName"
                     $currentEffectName = $newName
                     
                     # Update HTML <title> tag
@@ -931,20 +1002,20 @@ function Start-Installation {
                 }
                 else {
                     # User chose Cancel
-                    Log-Status "Installation cancelled by user."
+                    Write-Status "Installation cancelled by user."
                     return $false # Return false on user cancel
                 }
                 
             }
             else {
                 # No conflict (New installation)
-                Log-Status "No conflicts found. Proceeding with installation."
+                Write-Status "No conflicts found. Proceeding with installation."
                 $installConfirmed = $true
             }
         } # End conflict loop
 
         # 4. Perform Installation
-        Log-Status "Installing '$currentEffectName' to $destFolder"
+        Write-Status "Installing '$currentEffectName' to $destFolder"
         
         # Ensure destination folder exists
         if (-not (Test-Path -Path $destFolder)) {
@@ -957,12 +1028,12 @@ function Start-Installation {
 
         # Copy HTML
         Copy-Item -Path $currentHtmlFile -Destination $finalHtmlPath -Force
-        Log-Status "Copied HTML to: $finalHtmlPath"
+        Write-Status "Copied HTML to: $finalHtmlPath"
         
         # Copy PNG if it exists
         if ($currentPngFile -and (Test-Path -Path $currentPngFile)) {
             Copy-Item -Path $currentPngFile -Destination $finalPngPath -Force
-            Log-Status "Copied PNG to: $finalPngPath"
+            Write-Status "Copied PNG to: $finalPngPath"
         }
         
         # 5. Set Registry Keys (Always set the registry key to make it the active effect)
@@ -974,33 +1045,95 @@ function Start-Installation {
         if (-not $isOverwrite) {
             # A new installation or a rename occurred, so a restart is required.
             $restartRequired = $true
-            Log-Status "Installation finished. Restart is required for this effect."
+            Write-Status "Installation finished. Restart is required for this effect."
         }
         else {
             # It was an overwrite. Only registry change needed.
             $restartRequired = $false
-            Log-Status "Overwrite finished. No restart required."
+            Write-Status "Overwrite finished. No restart required."
         }
         
         [System.Windows.Forms.MessageBox]::Show("Effect '$currentEffectName' installed/updated successfully and set as active.", "Installation Complete", "OK", "Information") | Out-Null
         
-        # <<< MODIFICATION: Return the restart status instead of handling the restart here
         return $restartRequired
 
     }
     catch {
-        Log-Status "FATAL ERROR during installation: $($_.Exception.Message)"
+        Write-Status "FATAL ERROR during installation: $($_.Exception.Message)"
         [System.Windows.Forms.MessageBox]::Show("A fatal error occurred during installation of '$currentEffectName':`n$($_.Exception.Message)", "Fatal Error", "OK", "Error") | Out-Null
         return $false # Return false on fatal error
     }
     finally {
         # 7. Clean up temp folder if we created one
         if ($tempExtractFolder -and (Test-Path -Path $tempExtractFolder)) {
-            Log-Status "Cleaning up temporary folder: $tempExtractFolder"
+            Write-Status "Cleaning up temporary folder: $tempExtractFolder"
             Remove-Item -Path $tempExtractFolder -Recurse -Force
         }
     }
 }
+
+# --- Headless Drag-and-Drop/Send To Handler (Now after functions) ---
+if ($args.Count -gt 0) {
+    # We assume all arguments are files passed by the OS when using drag-and-drop or Send To.
+    
+    $batchRestartRequired = $false
+    $AppName = "SignalRGB" # Needs to be defined in this scope
+
+    Write-Host "Starting headless installation for $($args.Count) file(s)..."
+    
+    foreach ($droppedFile in $args) {
+        $droppedFile = $droppedFile.Trim()
+        
+        if (Test-Path -Path $droppedFile -PathType Leaf) {
+            $ext = [System.IO.Path]::GetExtension($droppedFile).ToLower()
+            
+            if ($ext -eq ".zip" -or $ext -eq ".html") {
+                Write-Host "Processing: $droppedFile"
+
+                $restartNeeded = $false
+                
+                try {
+                    $restartNeeded = Start-Installation -FilePath $droppedFile
+                } 
+                catch {
+                    [System.Windows.Forms.MessageBox]::Show("A critical error occurred during installation of $($droppedFile): $($_.Exception.Message)", "Fatal Error", "OK", "Error") | Out-Null
+                    continue
+                }
+                
+                if ($restartNeeded) {
+                    $batchRestartRequired = $true
+                }
+            }
+            else {
+                Write-Host "Skipping invalid file type: $droppedFile"
+            }
+        }
+    }
+    
+    # Final Restart Prompt (if at least one installed file required it)
+    if ($batchRestartRequired) {
+        $restartResult = [System.Windows.Forms.MessageBox]::Show("Batch installation complete.`n`n$AppName must be restarted to load the new effect(s). Restart now?", "Restart Required", "YesNo", "Question")
+        
+        if ($restartResult -eq 'Yes') {
+            Write-Host "User chose to restart."
+            try {
+                Stop-Process -Name $AppName -Force -ErrorAction Stop
+                Write-Host "$AppName process stopped. It should restart automatically."
+            }
+            catch {
+                [System.Windows.Forms.MessageBox]::Show("Could not stop $AppName. Please restart it manually.", "Restart Failed", "OK", "Warning") | Out-Null
+            }
+        }
+    }
+    else {
+         [System.Windows.Forms.MessageBox]::Show("Batch installation complete. No restart was required.", "Installation Complete", "OK", "Information") | Out-Null
+    }
+
+    # Exit the script after a successful headless install
+    exit 0
+}
+# --- End Headless Handler ---
+
 
 # --- GUI Definition ---
 
@@ -1049,11 +1182,11 @@ if (Test-Path -Path $localLogoPath) {
         $logoLoaded = $true
     }
     catch {
-        Log-Status "ERROR: Could not load logo.png: $($_.Exception.Message)"
+        Write-Status "ERROR: Could not load logo.png: $($_.Exception.Message)"
     }
 }
 else {
-    Log-Status "No logo.png found. Hiding logo area."
+    Write-Status "No logo.png found. Hiding logo area."
 }
 
 # --- Row 1: File Input ---
@@ -1107,13 +1240,13 @@ $fileInputLayout.Controls.Add($lnkBuilder, 1, 2) # Add to new row 2
 $fileInputLayout.SetColumnSpan($lnkBuilder, 2)
 
 $lnkBuilder.Add_LinkClicked({
-        param($sender, $e)
+        param($s, $e) # FIX: Renamed $sender to $s
         try {
             [System.Diagnostics.Process]::Start($e.Link.LinkData)
             $e.Link.Visited = $true
         }
         catch {
-            Log-Status "ERROR: Could not open URL: $($e.Link.LinkData)"
+            Write-Status "ERROR: Could not open URL: $($e.Link.LinkData)"
         }
     })
 # --- End of NEW LinkLabel ---
@@ -1169,8 +1302,9 @@ $mainLayout.Controls.Add($script:txtStatus, 0, 3)
 # Add_Shown fires *after* the form is visible and the handle is created,
 # preventing the BeginInvoke error.
 $Global:mainForm.Add_Shown({
-        Log-Status "Application started."
-        Log-Status "Looking for resources in: $Global:ScriptDirectory"
+        # Logging will work here as the form is visible and the handle is created
+        Write-Status "Application started."
+        Write-Status "Looking for resources in: $Global:ScriptDirectory"
     
         # Set Window Icon
         if (Test-Path -Path $localIconPath) {
@@ -1179,57 +1313,63 @@ $Global:mainForm.Add_Shown({
                 $Global:mainForm.Icon = New-Object System.Drawing.Icon($iconStream)
                 $iconStream.Close()
                 $iconStream.Dispose()
-                Log-Status "Successfully set window icon."
+                Write-Status "Successfully set window icon."
             }
             catch {
-                Log-Status "WARNING: Could not load icon.ico: $($_.Exception.Message)"
+                Write-Status "WARNING: Could not load icon.ico: $($_.Exception.Message)"
             }
         }
         else {
-            Log-Status "No icon.ico found. Using default icon."
+            Write-Status "No icon.ico found. Using default icon."
         }
     
         # Set logo status
         if ($logoLoaded) {
-            Log-Status "Logo loaded successfully from local file."
+            Write-Status "Logo loaded successfully from local file."
         }
 
-        # --- NEW: Check for existing shortcuts ---
-        Log-Status "Checking for Desktop shortcut at: $Global:DesktopShortcutPath"
-        # -PathType Leaf ensures we are looking for a file, not a directory or a recycled item
+        # --- Check for missing items (Robust Logic) ---
+        Write-Status "--- Checking for Installer Shortcuts and Registry Keys ---"
+        
+        # Check Shortcut Files
         $desktopExists = (Test-Path -Path $Global:DesktopShortcutPath -PathType Leaf)
-        Log-Status "Desktop shortcut exists: $desktopExists"
-    
-        Log-Status "Checking for Start Menu shortcut at: $Global:StartMenuShortcutPath"
         $startMenuExists = (Test-Path -Path $Global:StartMenuShortcutPath -PathType Leaf)
-        Log-Status "Start Menu shortcut exists: $startMenuExists"
+        $sendToExists = (Test-Path -Path $Global:SendToShortcutPath -PathType Leaf)
+        
+        # Check Registry Key (Open With)
+        $openWithKeyPath = "HKCU:\Software\Microsoft\Windows\CurrentVersion\App Paths\SignalRGB Installer.exe"
+        $openWithExists = Test-Path -Path $openWithKeyPath
 
-        if (-not $desktopExists -or -not $startMenuExists) {
-            Log-Status "One or more shortcuts are missing. Prompting user."
-            $promptResult = [System.Windows.Forms.MessageBox]::Show("Would you like to create a shortcut for this installer on your Desktop and/or Start Menu?", "Create Shortcut?", "YesNo", "Question")
+        $isAnyMissing = (-not $desktopExists -or -not $startMenuExists -or -not $sendToExists -or -not $openWithExists)
+        
+        Write-Status "Desktop: $desktopExists, Start Menu: $startMenuExists, Send To: $sendToExists, Open With Reg: $openWithExists"
+
+        if ($isAnyMissing) {
+            Write-Status "One or more desired setup items are missing. Prompting user."
+            $promptResult = [System.Windows.Forms.MessageBox]::Show("Would you like to create shortcuts on your Desktop, Start Menu, 'Send To' menu, and/or 'Open with' context menu?", "Create Shortcut/Registry?", "YesNo", "Question")
         
             if ($promptResult -eq 'Yes') {
-                # Call the shortcut window, pre-checking the boxes for the missing ones
-                Show-CreateShortcutWindow -ScriptDirectory $Global:ScriptDirectory -IconPath $localIconPath -CheckDesktop (-not $desktopExists) -CheckStartMenu (-not $startMenuExists)
+                # Pre-check the boxes for the missing ones only
+                Show-CreateShortcutWindow -ScriptDirectory $Global:ScriptDirectory -IconPath $localIconPath -CheckDesktop (-not $desktopExists) -CheckStartMenu (-not $startMenuExists) -CheckSendTo (-not $sendToExists) -CheckOpenWith (-not $openWithExists)
             }
         }
 
         # Initial Log of Registry Key
         try {
-            Log-Status "Reading registry key: $RegKey"
+            Write-Status "Reading registry key: $RegKey"
             $userDir = (Get-ItemProperty -Path $RegKey -Name $RegValue).$RegValue
-            Log-Status "Found folder: $userDir"
+            Write-Status "Found folder: $userDir"
             $effectsDir = Join-Path -Path $userDir -ChildPath $EffectsSubFolder
-            Log-Status "Effect install directory set to: $effectsDir"
+            Write-Status "Effect install directory set to: $effectsDir"
         }
         catch {
-            Log-Status "ERROR: Could not read SignalRGB registry key on startup."
+            Write-Status "ERROR: Could not read SignalRGB registry key on startup."
         }
     })
 
 # Drag and Drop Event
 $txtFilePath.Add_DragEnter({
-        param($sender, $e)
+        param($s, $e) # FIX: Renamed $sender to $s
         if ($e.Data.GetDataPresent([System.Windows.Forms.DataFormats]::FileDrop)) {
             $files = $e.Data.GetData([System.Windows.Forms.DataFormats]::FileDrop)
         
@@ -1246,7 +1386,7 @@ $txtFilePath.Add_DragEnter({
     })
 
 $txtFilePath.Add_DragDrop({
-        param($sender, $e)
+        param($s, $e) # FIX: Renamed $sender to $s
         $files = $e.Data.GetData([System.Windows.Forms.DataFormats]::FileDrop)
     
         if ($files.Count -gt 0) {
@@ -1259,20 +1399,20 @@ $txtFilePath.Add_DragDrop({
                     $validFiles += $file
                 }
                 else {
-                    Log-Status "Skipped file due to invalid type: $file"
+                    Write-Status "Skipped file due to invalid type: $file"
                 }
             }
         
             if ($validFiles.Count -gt 0) {
                 $fileList = $validFiles -join ";"
                 $txtFilePath.Text = $fileList
-                Log-Status "Files selected by drag-drop: $($validFiles.Count) valid files selected."
+                Write-Status "Files selected by drag-drop: $($validFiles.Count) valid files selected."
             
                 # Since multiple files are selected, update the hint label to prompt the user to click Install
                 $lblHint.Text = "Multiple files loaded. Click **'Install Effect'** to process them sequentially."
             }
             else {
-                Log-Status "No valid .zip or .html files were dropped."
+                Write-Status "No valid .zip or .html files were dropped."
                 $txtFilePath.Text = ""
             }
         }
@@ -1303,7 +1443,7 @@ $btnBrowse.Add_Click({
             if ($validFiles.Count -gt 0) {
                 $fileList = $validFiles -join ";"
                 $txtFilePath.Text = $fileList
-                Log-Status "Files selected via browse: $($validFiles.Count) valid files selected."
+                Write-Status "Files selected via browse: $($validFiles.Count) valid files selected."
             
                 # Update hint label to match batch installation mode
                 if ($validFiles.Count -gt 1) {
@@ -1316,7 +1456,7 @@ $btnBrowse.Add_Click({
             else {
                 [System.Windows.Forms.MessageBox]::Show("You must select at least one .zip or .html file.", "No Valid Selection", "OK", "Warning") | Out-Null
                 $txtFilePath.Text = ""
-                Log-Status "Browse operation canceled or no valid files selected."
+                Write-Status "Browse operation canceled or no valid files selected."
             }
         }
     })
@@ -1348,11 +1488,11 @@ $btnInstall.Add_Click({
         try {
             foreach ($file in $filesToInstall) {
                 if (-not (Test-Path -Path $file)) {
-                    Log-Status "ERROR: Skipped. File not found: $file"
+                    Write-Status "ERROR: Skipped. File not found: $file"
                     [System.Windows.Forms.MessageBox]::Show("Skipping installation for '$file': File not found.", "File Not Found", "OK", "Error") | Out-Null
                     continue
                 }
-                Log-Status "--- Starting Sequential Install for: $file ---"
+                Write-Status "--- Starting Sequential Install for: $file ---"
             
                 # Capture the return status from Start-Installation
                 $isRestartNeededForFile = Start-Installation -FilePath $file
@@ -1361,46 +1501,46 @@ $btnInstall.Add_Click({
                     $batchRestartRequired = $true
                 }
 
-                Log-Status "--- Finished Install for: $file ---"
+                Write-Status "--- Finished Install for: $file ---"
             }
         
             # FINAL RESTART PROMPT (Only executed if at least one file needed a restart)
             if ($batchRestartRequired) {
-                Log-Status "One or more new/renamed effects were installed. Prompting user to restart $AppName."
+                Write-Status "One or more new/renamed effects were installed. Prompting user to restart $AppName."
                 $restartResult = [System.Windows.Forms.MessageBox]::Show("All files processed.`n`n$AppName must be restarted to load the new effect(s). Restart now?", "Restart Required", "YesNo", "Question")
             
                 if ($restartResult -eq 'Yes') {
-                    Log-Status "User chose to restart."
-                    Log-Status "Attempting to stop $AppName to force reload..."
+                    Write-Status "User chose to restart."
+                    Write-Status "Attempting to stop $AppName to force reload..."
                     try {
                         $process = Get-Process -Name $AppName -ErrorAction Stop
                         if ($process) {
                             Stop-Process -Name $AppName -Force
-                            Log-Status "$AppName process stopped. It should restart automatically after a few seconds. Start it manually otherwise."
+                            Write-Status "$AppName process stopped. It should restart automatically after a few seconds. Start it manually otherwise."
                         }
                         else {
-                            Log-Status "$AppName is not running."
+                            Write-Status "$AppName is not running."
                         }
                     }
                     catch {
-                        Log-Status "WARNING: Could not stop $AppName. It may be running as Administrator."
-                        Log-Status "Please restart $AppName manually to see the new effect(s)."
+                        Write-Status "WARNING: Could not stop $AppName. It may be running as Administrator."
+                        Write-Status "Please restart $AppName manually to see the new effect(s)."
                         [System.Windows.Forms.MessageBox]::Show("Could not stop $AppName (it may be running as Administrator).`n`nPlease restart it manually to see the new effect(s).", "Restart Failed", "OK", "Warning") | Out-Null
                     }
                 }
                 else {
-                    Log-Status "User declined automatic restart. Manual restart required."
+                    Write-Status "User declined automatic restart. Manual restart required."
                     [System.Windows.Forms.MessageBox]::Show("Batch installation complete.`n`nManual restart of $AppName is required to see all new effect(s).", "Manual Restart Needed", "OK", "Information") | Out-Null
                 }
             }
             else {
-                Log-Status "Batch installation complete. No restart was required."
+                Write-Status "Batch installation complete. No restart was required."
                 [System.Windows.Forms.MessageBox]::Show("Batch installation complete.`n`nNo restart of $AppName was required.", "Installation Complete", "OK", "Information") | Out-Null
             }
         
         }
         catch {
-            Log-Status "Unhandled exception during file iteration: $($_.Exception.Message)"
+            Write-Status "Unhandled exception during file iteration: $($_.Exception.Message)"
         }
         finally {
             # Re-enable button
@@ -1421,7 +1561,7 @@ $btnUninstall.Add_Click({
             Show-UninstallWindow -EffectsBasePath $effectsDir
         }
         catch {
-            Log-Status "ERROR: Could not get effects directory for uninstaller. $($_.Exception.Message)"
+            Write-Status "ERROR: Could not get effects directory for uninstaller. $($_.Exception.Message)"
             [System.Windows.Forms.MessageBox]::Show("Could not find the SignalRGB Effects directory.`nHave you run SignalRGB at least once?", "Error", "OK", "Error") | Out-Null
         }
     })
@@ -1432,5 +1572,5 @@ $btnDisclaimer.Add_Click({
     })
 
 # --- Show the Form ---
-Log-Status "GUI Initialized. Showing main window."
+Write-Status "GUI Initialized. Showing main window."
 [System.Windows.Forms.Application]::Run($Global:mainForm)
