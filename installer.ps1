@@ -4,6 +4,7 @@
 # Load these first to ensure all UI elements (even error popups) get modern styling
 Add-Type -AssemblyName System.Windows.Forms
 Add-Type -AssemblyName System.Drawing
+Add-Type -AssemblyName Microsoft.VisualBasic
 
 # Set high DPI awareness and visual styles
 try {
@@ -15,11 +16,11 @@ catch {}
 
 <#
 .SYNOPSIS
-    A GUI-based installer for SignalRGB effects.
-    Handles .html, .png, and .zip files.
-    Manages folder creation, conflict detection (file and <title> tag),
-    overwrite/rename logic, and app restart.
-    Includes an uninstaller and shortcut creation.
+    A GUI-based installer for SignalRGB effects and components.
+    Auto-detects file type (.html, .json, .zip) and installs to the correct folder.
+    Effects are installed to .../Effects/[EffectName]/[EffectName].html
+    Components are installed to .../Components/[ComponentName].json
+    Includes a unified uninstaller.
 #>
 
 # --- Script-Wide Variables ---
@@ -54,6 +55,7 @@ $RegKey = "HKCU:\Software\WhirlwindFX\SignalRgb"
 $RegValue = "UserDirectory"
 $AppName = "SignalRGB"
 $EffectsSubFolder = "Effects" # The subfolder inside UserDirectory
+$ComponentsSubFolder = "Components" # The subfolder for components
 
 # --- Load Remaining Assemblies ---
 Add-Type -AssemblyName System.IO.Compression.FileSystem
@@ -218,8 +220,10 @@ function Show-CreateShortcutWindow {
                 # WScript.Shell is the object that creates shortcuts
                 $wsShell = New-Object -ComObject WScript.Shell
 
-                $targetFile = "C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe"
-                $arguments = "-WindowStyle Hidden -ExecutionPolicy Bypass -File ""$Global:ScriptFullPath"""
+                # Get the full path to the launch.vbs script
+                $targetFile = Join-Path -Path $Global:ScriptDirectory -ChildPath "launch.vbs"
+                # The VBScript handles all arguments, so this should be empty
+                $arguments = ""
 
                 if ($chkDesktop.Checked) {
                     try {
@@ -280,7 +284,8 @@ function Show-CreateShortcutWindow {
                 }
                 
                 if ($chkOpenWith.Checked) {
-                    Set-OpenWithRegistryKeys -AppName "SignalRGB Installer" -AppPath $Global:ScriptFullPath -FileExtensions @(".zip", ".html")
+                    # MODIFIED: Add .json to the Open With list
+                    Set-OpenWithRegistryKeys -AppName "SignalRGB Installer" -AppPath $Global:ScriptFullPath -FileExtensions @(".zip", ".html", ".json")
                 }
             
                 # Dialog will close cleanly because DialogResult is set on the button
@@ -298,13 +303,17 @@ function Show-CreateShortcutWindow {
 
 function Show-UninstallWindow {
     param (
-        [string]$EffectsBasePath
+        [string]$UserDirectory # MODIFIED: Pass base user directory
     )
 
+    # Define paths based on UserDirectory
+    $effectsBasePath = Join-Path -Path $UserDirectory -ChildPath $EffectsSubFolder
+    $componentsBasePath = Join-Path -Path $UserDirectory -ChildPath $ComponentsSubFolder
+
     $uninstallForm = New-Object System.Windows.Forms.Form
-    $uninstallForm.Text = "Uninstall Effects"
-    $uninstallForm.Size = New-Object System.Drawing.Size(500, 400)
-    $uninstallForm.MinimumSize = New-Object System.Drawing.Size(300, 200)
+    $uninstallForm.Text = "Uninstall Effects / Components"
+    $uninstallForm.Size = New-Object System.Drawing.Size(550, 400) # Increased width for 2 columns
+    $uninstallForm.MinimumSize = New-Object System.Drawing.Size(400, 200)
     $uninstallForm.FormBorderStyle = 'Sizable'
     $uninstallForm.MaximizeBox = $true
     $uninstallForm.MinimizeBox = $true
@@ -332,7 +341,7 @@ function Show-UninstallWindow {
     $layout.Controls.Add($headerPanel, 0, 0)
     
     $lblInfo = New-Object System.Windows.Forms.Label
-    $lblInfo.Text = "Select effects to delete:"
+    $lblInfo.Text = "Select items to delete (moves to Recycle Bin):" # MODIFIED
     $lblInfo.Dock = 'Fill'
     $lblInfo.TextAlign = 'MiddleLeft'
     $headerPanel.Controls.Add($lblInfo, 0, 0)
@@ -343,11 +352,58 @@ function Show-UninstallWindow {
     $btnRefresh.Anchor = 'Right'
     $headerPanel.Controls.Add($btnRefresh, 1, 0)
 
-    # --- Effect List ---
+    # --- SCRIPT CHANGE: Create a 2-column layout for the lists ---
+    $listsLayout = New-Object System.Windows.Forms.TableLayoutPanel
+    $listsLayout.Dock = 'Fill'
+    $listsLayout.Margin = [System.Windows.Forms.Padding]::new(0, 5, 0, 5)
+    $listsLayout.ColumnCount = 2
+    $listsLayout.RowCount = 1
+    $listsLayout.ColumnStyles.Add((New-Object System.Windows.Forms.ColumnStyle([System.Windows.Forms.SizeType]::Percent, 50))) | Out-Null
+    $listsLayout.ColumnStyles.Add((New-Object System.Windows.Forms.ColumnStyle([System.Windows.Forms.SizeType]::Percent, 50))) | Out-Null
+    $layout.Controls.Add($listsLayout, 0, 1)
+
+    # --- Column 0: Effects List ---
+    $effectsLayout = New-Object System.Windows.Forms.TableLayoutPanel
+    $effectsLayout.Dock = 'Fill'
+    $effectsLayout.ColumnCount = 1
+    $effectsLayout.RowCount = 2
+    $effectsLayout.RowStyles.Add((New-Object System.Windows.Forms.RowStyle([System.Windows.Forms.SizeType]::AutoSize))) | Out-Null
+    $effectsLayout.RowStyles.Add((New-Object System.Windows.Forms.RowStyle([System.Windows.Forms.SizeType]::Percent, 100))) | Out-Null
+    $listsLayout.Controls.Add($effectsLayout, 0, 0)
+
+    $lblEffects = New-Object System.Windows.Forms.Label
+    $lblEffects.Text = "Effects:"
+    $lblEffects.Font = New-Object System.Drawing.Font($lblInfo.Font, [System.Drawing.FontStyle]::Bold)
+    $lblEffects.Dock = 'Fill'
+    $effectsLayout.Controls.Add($lblEffects, 0, 0)
+
     $clbEffects = New-Object System.Windows.Forms.CheckedListBox
     $clbEffects.Dock = 'Fill'
-    $clbEffects.Margin = [System.Windows.Forms.Padding]::new(0, 5, 0, 5)
-    $layout.Controls.Add($clbEffects, 0, 1)
+    $clbEffects.CheckOnClick = $true
+    $clbEffects.Margin = [System.Windows.Forms.Padding]::new(0, 3, 5, 0) # Add margin to the right
+    $effectsLayout.Controls.Add($clbEffects, 0, 1)
+
+    # --- Column 1: Components List ---
+    $componentsLayout = New-Object System.Windows.Forms.TableLayoutPanel
+    $componentsLayout.Dock = 'Fill'
+    $componentsLayout.ColumnCount = 1
+    $componentsLayout.RowCount = 2
+    $componentsLayout.RowStyles.Add((New-Object System.Windows.Forms.RowStyle([System.Windows.Forms.SizeType]::AutoSize))) | Out-Null
+    $componentsLayout.RowStyles.Add((New-Object System.Windows.Forms.RowStyle([System.Windows.Forms.SizeType]::Percent, 100))) | Out-Null
+    $listsLayout.Controls.Add($componentsLayout, 1, 0)
+
+    $lblComponents = New-Object System.Windows.Forms.Label
+    $lblComponents.Text = "Components:"
+    $lblComponents.Font = New-Object System.Drawing.Font($lblInfo.Font, [System.Drawing.FontStyle]::Bold)
+    $lblComponents.Dock = 'Fill'
+    $componentsLayout.Controls.Add($lblComponents, 0, 0)
+
+    $clbComponents = New-Object System.Windows.Forms.CheckedListBox
+    $clbComponents.Dock = 'Fill'
+    $clbComponents.CheckOnClick = $true
+    $clbComponents.Margin = [System.Windows.Forms.Padding]::new(5, 3, 0, 0) # Add margin to the left
+    $componentsLayout.Controls.Add($clbComponents, 0, 1)
+    # --- End of layout change ---
 
     # --- Footer: Delete Button ---
     $btnDelete = New-Object System.Windows.Forms.Button
@@ -358,48 +414,69 @@ function Show-UninstallWindow {
 
     # --- Functions for this window ---
     $populateList = {
+        # --- SCRIPT CHANGE: Populate two separate lists ---
         $clbEffects.Items.Clear()
-        Write-Status "Refreshing effect list from: $EffectsBasePath"
-        if (-not (Test-Path -Path $EffectsBasePath)) {
+        $clbComponents.Items.Clear()
+        $totalItems = 0
+
+        Write-Status "Refreshing effect list from: $effectsBasePath"
+        if (Test-Path -Path $effectsBasePath) {
+            try {
+                $effects = Get-ChildItem -Path $effectsBasePath -Directory | ForEach-Object { $_.Name } | Sort-Object
+                $clbEffects.Items.AddRange($effects)
+                $totalItems += $effects.Count
+                Write-Status "Found $($effects.Count) effects."
+            }
+            catch {
+                Write-Status "ERROR scanning for effects: $($_.Exception.Message)"
+            }
+        }
+        else {
             Write-Status "Effects folder does not exist. Nothing to list."
-            return
+        }
+
+        Write-Status "Refreshing component list from: $componentsBasePath"
+        if (Test-Path -Path $componentsBasePath) {
+            try {
+                $components = Get-ChildItem -Path $componentsBasePath -Filter "*.json" | ForEach-Object { $_.Name } | Sort-Object
+                $clbComponents.Items.AddRange($components)
+                $totalItems += $components.Count
+                Write-Status "Found $($components.Count) components."
+            }
+            catch {
+                Write-Status "ERROR scanning for components: $($_.Exception.Message)"
+            }
+        }
+        else {
+            Write-Status "Components folder does not exist. Nothing to list."
         }
         
-        try {
-            # Find all .html files within subdirectories of the Effects folder
-            $effects = Get-ChildItem -Path $EffectsBasePath -Recurse -Filter "*.html" | ForEach-Object {
-                [PSCustomObject]@{
-                    Name     = $_.Directory.Name # Get the folder name
-                    HtmlFile = $_.FullName
-                    PngFile  = Join-Path -Path $_.Directory.FullName -ChildPath ($_.BaseName + ".png")
-                    Folder   = $_.Directory.FullName
-                }
-            } | Sort-Object Name
-            
-            # Add unique folder names to the list
-            $uniqueFolders = $effects | Select-Object -ExpandProperty Name -Unique
-            foreach ($folderName in $uniqueFolders) {
-                $clbEffects.Items.Add($folderName, $false) | Out-Null
-            }
-            Write-Status "Found $($uniqueFolders.Count) effects."
-        }
-        catch {
-            Write-Status "ERROR scanning for effects: $($_.Exception.Message)"
-        }
+        Write-Status "Found $totalItems total items."
     }
 
     $btnRefresh.Add_Click({
-            Invoke-Command $populateList
+            $populateList.Invoke() # Use .Invoke() for script blocks
         })
 
     $btnDelete.Add_Click({
-            $selectedItems = $clbEffects.CheckedItems
+            # --- SCRIPT CHANGE: Get checked items from both lists ---
+            $selectedItems = @()
+            
+            foreach ($item in $clbEffects.CheckedItems) {
+                $selectedItems += "[Effect] $item"
+            }
+            foreach ($item in $clbComponents.CheckedItems) {
+                $selectedItems += "[Component] $item"
+            }
+            # --- End of script change ---
+            
             if ($selectedItems.Count -eq 0) {
-                [System.Windows.Forms.MessageBox]::Show("Please select one or more effects to delete.", "No Selection", "OK", "Information") | Out-Null
+                [System.Windows.Forms.MessageBox]::Show("Please select one or more items to delete.", "No Selection", "OK", "Information") | Out-Null
                 return
             }
 
-            # --- NEW: Logic to determine if the active effect is being deleted ---
+            # --- Logic to determine if the active effect is being deleted ---
+            # --- SCRIPT CHANGE: Get effect folders from the $clbEffects list ---
             $originalEffectFolders = @($clbEffects.Items)
             $currentAlwaysTitle = ""
             $currentAlwaysFolder = $null
@@ -414,9 +491,9 @@ function Show-UninstallWindow {
             if (-not [string]::IsNullOrWhiteSpace($currentAlwaysTitle)) {
                 # Find the folder name that corresponds to the active title
                 foreach ($folderName in $originalEffectFolders) {
-                    $effectHtmlPath = Join-Path -Path $EffectsBasePath -ChildPath "$folderName\$folderName.html"
+                    $effectHtmlPath = Join-Path -Path $effectsBasePath -ChildPath "$folderName\$folderName.html"
                     $title = Get-EffectTitleFromHtml -HtmlFilePath $effectHtmlPath
-                    # --- FIX: Reversed the .Equals() call to prevent null reference error ---
+                    
                     if (-not [string]::IsNullOrWhiteSpace($title) -and $currentAlwaysTitle.Equals($title, [StringComparison]::OrdinalIgnoreCase)) {
                         $currentAlwaysFolder = $folderName
                         break
@@ -425,16 +502,17 @@ function Show-UninstallWindow {
             }
         
             $activeEffectFolderWasDeleted = $false
-            if ($currentAlwaysFolder -and $selectedItems -contains $currentAlwaysFolder) {
+            $selectedEffectItems = $selectedItems | Where-Object { $_ -like '[Effect]*' }
+            if ($currentAlwaysFolder -and $selectedEffectItems -contains "[Effect] $currentAlwaysFolder") {
                 $activeEffectFolderWasDeleted = $true
                 Write-Status "Active effect '$currentAlwaysTitle' is scheduled for deletion."
             }
             # --- End new logic block ---
 
-            # --- MOVED: Set new active effect *before* deleting files ---
+            # --- Set new active effect *before* deleting files ---
             if ($activeEffectFolderWasDeleted) {
                 Write-Status "Updating active effect registry keys..."
-                $remainingEffectFolders = @($originalEffectFolders | Where-Object { $_ -notin $selectedItems })
+                $remainingEffectFolders = @($originalEffectFolders | Where-Object { $_ -notin ($selectedEffectItems | ForEach-Object { $_ -replace '^\[Effect\] ', '' }) })
             
                 if ($remainingEffectFolders.Count -eq 0) {
                     # No effects left, set to empty
@@ -458,7 +536,7 @@ function Show-UninstallWindow {
                     }
 
                     $newEffectFolder = $remainingEffectFolders[$newIndex]
-                    $newEffectHtmlPath = Join-Path -Path $EffectsBasePath -ChildPath "$newEffectFolder\$newEffectFolder.html"
+                    $newEffectHtmlPath = Join-Path -Path $effectsBasePath -ChildPath "$newEffectFolder\$newEffectFolder.html"
                     $newEffectTitle = Get-EffectTitleFromHtml -HtmlFilePath $newEffectHtmlPath
                 
                     Write-Status "Setting new active effect to: '$newEffectTitle'"
@@ -467,44 +545,78 @@ function Show-UninstallWindow {
             }
             # --- End of moved block ---
 
-            foreach ($itemName in $selectedItems) {
-                $effectFolder = Join-Path -Path $EffectsBasePath -ChildPath $itemName
-                Write-Status "Deleting effect: $itemName"
-                try {
-                    # Find all html and png files in that folder
-                    # Fix: Ensure $filesToDelete is always an array by using @()
-                    $filesToDelete = @(Get-ChildItem -Path $effectFolder -Filter "*.html")
-                    $filesToDelete += @(Get-ChildItem -Path $effectFolder -Filter "*.png")
-
-                    foreach ($file in $filesToDelete) {
-                        Write-Status "Deleting file: $($file.Name)"
-                        Remove-Item -Path $file.FullName -Force
-                    }
+            # --- SCRIPT FIX: Use FileSystem.Delete... to send to Recycle Bin ---
+            foreach ($fullItemName in $selectedItems) {
                 
-                    # Check if folder is now empty
-                    if ((Get-ChildItem -Path $effectFolder -Force | Measure-Object).Count -eq 0) {
-                        Write-Status "Folder '$itemName' is empty, deleting it."
-                        Remove-Item -Path $effectFolder -Recurse -Force
+                $itemName = $null
+                $itemType = "Unknown"
+
+                try {
+                    if ($fullItemName.StartsWith("[Effect] ")) {
+                        $itemName = $fullItemName.Substring(9)
+                        $itemType = "Effect"
+                        $itemFolder = Join-Path -Path $effectsBasePath -ChildPath $itemName
+                        
+                        Write-Status "Moving ${itemType} to Recycle Bin: $itemName"
+                        if (Test-Path -Path $itemFolder) {
+                            [Microsoft.VisualBasic.FileIO.FileSystem]::DeleteDirectory(
+                                $itemFolder, 
+                                [Microsoft.VisualBasic.FileIO.UIOption]::OnlyErrorDialogs, 
+                                [Microsoft.VisualBasic.FileIO.RecycleOption]::SendToRecycleBin)
+                            Write-Status "Successfully recycled $itemType '$itemName' (folder)."
+                        }
+                        else {
+                            Write-Status "Folder '$itemFolder' not found for deletion. Skipping."
+                        }
+                    }
+                    elseif ($fullItemName.StartsWith("[Component] ")) {
+                        $itemName = $fullItemName.Substring(12) # $itemName is now "MyComponent.json"
+                        $itemType = "Component"
+                        
+                        $jsonFilePath = Join-Path -Path $componentsBasePath -ChildPath $itemName
+                        $pngFilePath = Join-Path -Path $componentsBasePath -ChildPath "$([System.IO.Path]::GetFileNameWithoutExtension($itemName)).png"
+                        
+                        Write-Status "Moving ${itemType} to Recycle Bin: $itemName"
+                        
+                        if (Test-Path -Path $jsonFilePath) {
+                            [Microsoft.VisualBasic.FileIO.FileSystem]::DeleteFile(
+                                $jsonFilePath, 
+                                [Microsoft.VisualBasic.FileIO.UIOption]::OnlyErrorDialogs, 
+                                [Microsoft.VisualBasic.FileIO.RecycleOption]::SendToRecycleBin)
+                            Write-Status "Successfully recycled file: $itemName"
+                        }
+                        else {
+                            Write-Status "File '$jsonFilePath' not found for deletion. Skipping."
+                        }
+                        
+                        # Conditionally delete matching .png
+                        if (Test-Path -Path $pngFilePath) {
+                            [Microsoft.VisualBasic.FileIO.FileSystem]::DeleteFile(
+                                $pngFilePath, 
+                                [Microsoft.VisualBasic.FileIO.UIOption]::OnlyErrorDialogs, 
+                                [Microsoft.VisualBasic.FileIO.RecycleOption]::SendToRecycleBin)
+                            Write-Status "Successfully recycled matching PNG: $(Split-Path $pngFilePath -Leaf)"
+                        }
                     }
                     else {
-                        Write-Status "Folder '$itemName' is not empty, will not delete folder."
+                        Write-Status "Skipping unknown item in delete list: $fullItemName"
                     }
-                    Write-Status "Successfully deleted effect '$itemName'."
                 }
                 catch {
                     Write-Status "ERROR deleting '$itemName': $($_.Exception.Message)"
                     [System.Windows.Forms.MessageBox]::Show("Error deleting '$itemName':`n$($_.Exception.Message)", "Error", "OK", "Error") | Out-Null
                 }
             }
+            # --- End of script fix ---
         
             Write-Status "Deletion complete."
         
             # Refresh the list
-            Invoke-Command $populateList
+            $populateList.Invoke()
         })
 
     # --- Initial Load ---
-    Invoke-Command $populateList
+    $populateList.Invoke()
     $uninstallForm.ShowDialog($Global:mainForm) | Out-Null
     $uninstallForm.Dispose()
 }
@@ -550,7 +662,7 @@ function Find-EffectTitleConflict {
     $allHtmlFiles = Get-ChildItem -Path $EffectsBasePath -Recurse -Filter "*.html"
     foreach ($file in $allHtmlFiles) {
         $existingTitle = Get-EffectTitleFromHtml -HtmlFilePath $file.FullName
-        # --- FIX: Reversed the .Equals() call to prevent null reference error ---
+        
         if ($existingTitle -and ($NewEffectTitle.Equals($existingTitle, [StringComparison]::OrdinalIgnoreCase))) {
             return $file.FullName # Return path of conflicting file
         }
@@ -564,7 +676,6 @@ function Show-ConflictDialog {
         [string]$Message
     )
     
-    # --- FIX: Rebuilt this function with TableLayoutPanel ---
     $dialog = New-Object System.Windows.Forms.Form
     $dialog.Text = "Conflict Detected"
     $dialog.Size = New-Object System.Drawing.Size(400, 170) # Increased height
@@ -638,7 +749,7 @@ function Show-RenameDialog {
     )
     
     $dialog = New-Object System.Windows.Forms.Form
-    $dialog.Text = "Rename Effect"
+    $dialog.Text = "Rename Item"
     $dialog.Size = New-Object System.Drawing.Size(350, 150)
     $dialog.FormBorderStyle = 'FixedDialog'
     $dialog.MaximizeBox = $false
@@ -647,7 +758,7 @@ function Show-RenameDialog {
     if ($Global:mainForm -and $Global:mainForm.Icon) { $dialog.Icon = $Global:mainForm.Icon }
 
     $lblInfo = New-Object System.Windows.Forms.Label
-    $lblInfo.Text = "Enter a new name for the effect:"
+    $lblInfo.Text = "Enter a new name for the item:"
     $lblInfo.Location = New-Object System.Drawing.Point(20, 20)
     $lblInfo.AutoSize = $true
     $dialog.Controls.Add($lblInfo)
@@ -720,6 +831,63 @@ function Set-EffectTitleInHtml {
     }
 }
 
+# --- NEW: Function to validate a component JSON file ---
+function Test-IsComponentJson {
+    param (
+        [string]$JsonFilePath
+    )
+    
+    try {
+        # Remove non-breaking space characters (U+00A0) before parsing
+        $jsonString = (Get-Content -Path $JsonFilePath -Raw) -replace "\u00A0", " "
+        $content = $jsonString | ConvertFrom-Json
+        
+        # Check for key properties that identify a component
+        if ($content.PSObject.Properties.Name -contains 'ProductName' -and
+            $content.PSObject.Properties.Name -contains 'LedCount' -and
+            $content.PSObject.Properties.Name -contains 'LedMapping') {
+            
+            Write-Status "JSON file confirmed as SignalRGB Component: $($content.ProductName)"
+            return $true
+        }
+        else {
+            Write-Status "ERROR: JSON file is missing required component properties (e.g., ProductName, LedCount)."
+            return $false
+        }
+    }
+    catch {
+        Write-Status "ERROR: Could not parse JSON file. $($_.Exception.Message)"
+        return $false
+    }
+}
+
+# --- NEW: Function to update component JSON file on rename ---
+function Set-ComponentNamesInJson {
+    param (
+        [string]$JsonFilePath,
+        [string]$NewName
+    )
+    
+    try {
+        # Remove non-breaking space characters (U+00A0) before parsing
+        $jsonString = (Get-Content -Path $JsonFilePath -Raw) -replace "\u00A0", " "
+        $component = $jsonString | ConvertFrom-Json
+        
+        $component.ProductName = $NewName
+        $component.DisplayName = $NewName
+        
+        # Convert back to JSON with sufficient depth for coordinate arrays
+        $component | ConvertTo-Json -Depth 10 | Set-Content -Path $JsonFilePath -Encoding UTF8
+        
+        Write-Status "Successfully updated component JSON with new name: $NewName"
+        return $true
+    }
+    catch {
+        Write-Status "ERROR: Could not read or write to $JsonFilePath to update component names. $($_.Exception.Message)"
+        return $false
+    }
+}
+
 function Set-ActiveEffectRegistryKeys {
     param(
         [string]$NewEffectTitle
@@ -770,7 +938,7 @@ This Tool is provided "as-is", without any warranties of any kind, express or im
 2. No Affiliation
 The developer of this Tool is not associated with SignalRGB or its parent company, WhirlwindFX. This is an unofficial, third-party application.
 
-3. Limitation of Liability
+3. Limitation of liability
 In no event shall the developer be liable for any claim, damages, or other liability arising from the use of, or inability to use, the Tool.
 
 4. User Responsibility
@@ -845,9 +1013,11 @@ function Start-Installation {
     
     Write-Status "Starting installation for: $FilePath"
     
-    # Flag to indicate if SignalRGB must be restarted after this installation.
-    # A restart is required for New Installs and Renames, but NOT for Overwrites.
+    # --- MODIFIED: restartRequired logic
+    # Effects: Only require restart for New/Rename.
+    # Components: ALWAYS require restart.
     $restartRequired = $false 
+    $isOverwrite = $false
     
     # 1. Get SignalRGB User Directory from Registry
     $userDir = $null
@@ -867,32 +1037,23 @@ function Start-Installation {
         return $false # Return false on failure
     }
 
-    # --- Define the correct base install folder ---
-    $installBasePath = Join-Path -Path $userDir -ChildPath $EffectsSubFolder
+    # --- Define the correct base install folders ---
+    $effectsBasePath = Join-Path -Path $userDir -ChildPath $EffectsSubFolder
+    $componentsBasePath = Join-Path -Path $userDir -ChildPath $ComponentsSubFolder
     
-    # --- Ensure the 'Effects' folder exists ---
-    if (-not (Test-Path -Path $installBasePath)) {
-        Write-Status "'$EffectsSubFolder' folder not found. Creating it..."
-        try {
-            New-Item -Path $installBasePath -ItemType Directory -Force | Out-Null
-            Write-Status "Created folder: $installBasePath"
-        }
-        catch {
-            Write-Status "ERROR: Could not create folder: $installBasePath. $($_.Exception.Message)"
-            [System.Windows.Forms.MessageBox]::Show("Error: Could not create folder:`n$installBasePath", "Error", "OK", "Error") | Out-Null
-            return $false # Return false on failure
-        }
-    }
-    
+    # --- Auto-detection variables ---
+    $installType = $null # 'Effect' or 'Component'
+    $installBasePath = $null
     $sourceHtmlFile = $null
+    $sourceJsonFile = $null
     $sourcePngFile = $null
-    $effectName = $null
+    $itemName = $null # The base name, e.g., "MyEffect" or "MyComponent"
     $tempExtractFolder = $null
     
     $extension = [System.IO.Path]::GetExtension($FilePath).ToLower()
     
     try {
-        # 2. Prepare source files based on input (zip, html, or png)
+        # 2. Prepare source files based on input (zip, html, or json)
         
         if ($extension -eq ".zip") {
             Write-Status "Zip file detected. Extracting..."
@@ -900,72 +1061,117 @@ function Start-Installation {
             [System.IO.Compression.ZipFile]::ExtractToDirectory($FilePath, $tempExtractFolder)
             Write-Status "Extracted to: $tempExtractFolder"
             
-            # Find the html and png files inside
+            # Find the html or json files inside
             $sourceHtmlFile = (Get-ChildItem -Path $tempExtractFolder -Recurse -Filter "*.html" | Select-Object -First 1).FullName
-            if (-not $sourceHtmlFile) {
-                Write-Status "ERROR: No .html file found in the zip archive."
-                [System.Windows.Forms.MessageBox]::Show("Error: No .html file found in the zip archive.", "Zip Error", "OK", "Error") | Out-Null
+            $sourceJsonFile = (Get-ChildItem -Path $tempExtractFolder -Recurse -Filter "*.json" | Select-Object -First 1).FullName
+
+            if ($sourceHtmlFile) {
+                # --- HTML file found, it's an Effect ---
+                $installType = 'Effect'
+                $itemName = [System.IO.Path]::GetFileNameWithoutExtension($sourceHtmlFile)
+                $sourcePngFile = (Get-ChildItem -Path (Split-Path $sourceHtmlFile) -Filter "$itemName.png" | Select-Object -First 1).FullName
+                Write-Status "Found Effect .html in zip: $itemName"
+            }
+            elseif ($sourceJsonFile) {
+                # --- No HTML, but JSON found, it's a Component ---
+                # Validate the JSON
+                if (-not (Test-IsComponentJson -JsonFilePath $sourceJsonFile)) {
+                    Write-Status "ERROR: .json file in zip is not a valid SignalRGB Component."
+                    [System.Windows.Forms.MessageBox]::Show("Error: The .json file in the zip archive is not a valid SignalRGB Component.", "Zip Error", "OK", "Error") | Out-Null
+                    return $false
+                }
+                
+                $installType = 'Component'
+                $itemName = [System.IO.Path]::GetFileNameWithoutExtension($sourceJsonFile)
+                $sourcePngFile = (Get-ChildItem -Path (Split-Path $sourceJsonFile) -Filter "$itemName.png" | Select-Object -First 1).FullName
+                Write-Status "Found Component .json in zip: $itemName"
+            }
+            else {
+                Write-Status "ERROR: No .html or .json file found in the zip archive."
+                [System.Windows.Forms.MessageBox]::Show("Error: No .html or .json file found in the zip archive.", "Zip Error", "OK", "Error") | Out-Null
                 return $false # Return false on failure
             }
-            
-            $effectName = [System.IO.Path]::GetFileNameWithoutExtension($sourceHtmlFile)
-            $sourcePngFile = (Get-ChildItem -Path (Split-Path $sourceHtmlFile) -Filter "$effectName.png" | Select-Object -First 1).FullName
-            if (-not $sourcePngFile) {
-                Write-Status "No matching .png found in zip. This might be ok."
-            }
-            
         }
         elseif ($extension -eq ".html") {
+            # --- Standalone HTML, it's an Effect ---
+            $installType = 'Effect'
             $sourceHtmlFile = $FilePath
-            $effectName = [System.IO.Path]::GetFileNameWithoutExtension($sourceHtmlFile)
-            $sourcePngFile = Join-Path -Path (Split-Path $FilePath) -ChildPath "$effectName.png"
-            if (-not (Test-Path -Path $sourcePngFile)) {
-                $sourcePngFile = $null # Don't try to copy a non-existent file
-                Write-Status "No matching .png found for $effectName. This might be ok."
+            $itemName = [System.IO.Path]::GetFileNameWithoutExtension($sourceHtmlFile)
+            $sourcePngFile = Join-Path -Path (Split-Path $FilePath) -ChildPath "$itemName.png"
+            if (-not (Test-Path -Path $sourcePngFile)) { $sourcePngFile = $null }
+            Write-Status "Detected standalone Effect file: $itemName"
+        }
+        elseif ($extension -eq ".json") {
+            # --- Standalone JSON, check if it's a Component ---
+            if (-not (Test-IsComponentJson -JsonFilePath $FilePath)) {
+                Write-Status "ERROR: This .json file is not a valid SignalRGB Component."
+                [System.Windows.Forms.MessageBox]::Show("Error: The selected .json file is not a valid SignalRGB Component.", "Invalid File", "OK", "Error") | Out-Null
+                return $false
             }
             
+            $installType = 'Component'
+            $sourceJsonFile = $FilePath
+            $itemName = [System.IO.Path]::GetFileNameWithoutExtension($sourceJsonFile)
+            $sourcePngFile = Join-Path -Path (Split-Path $FilePath) -ChildPath "$itemName.png"
+            if (-not (Test-Path -Path $sourcePngFile)) { $sourcePngFile = $null }
+            Write-Status "Detected standalone Component file: $itemName"
         }
         else {
-            Write-Status "ERROR: Invalid file type. Please select a .zip or .html file."
-            [System.Windows.Forms.MessageBox]::Show("Invalid file type. Please select a .zip or .html file.", "Invalid File", "OK", "Error") | Out-Null
+            Write-Status "ERROR: Invalid file type. Please select a .zip, .html, or .json file."
+            [System.Windows.Forms.MessageBox]::Show("Invalid file type. Please select a .zip, .html, or .json file.", "Invalid File", "OK", "Error") | Out-Null
             return $false # Return false on failure
         }
-
-        if (-not $sourceHtmlFile) {
-            Write-Status "ERROR: Could not determine source .html file."
-            return $false # Return false on failure
-        }
-
-        Write-Status "Effect Name (from file): $effectName"
-        Write-Status "Source HTML: $sourceHtmlFile"
-        Write-Status "Source PNG: $sourcePngFile"
 
         # 3. Conflict Detection Loop
         $installConfirmed = $false
-        $currentEffectName = $effectName
-        $currentHtmlFile = $sourceHtmlFile
-        $currentPngFile = $sourcePngFile
-        $isOverwrite = $false 
+        $currentItemName = $itemName
+        
+        # --- Set the correct path based on detected type ---
+        if ($installType -eq 'Effect') {
+            $installBasePath = $effectsBasePath
+        }
+        elseif ($installType -eq 'Component') {
+            $installBasePath = $componentsBasePath
+        }
+
+        # --- Ensure the target base folder ('Effects' or 'Components') exists ---
+        if (-not (Test-Path -Path $installBasePath)) {
+            Write-Status "'$($installBasePath | Split-Path -Leaf)' folder not found. Creating it..."
+            New-Item -Path $installBasePath -ItemType Directory -Force | Out-Null
+            Write-Status "Created folder: $installBasePath"
+        }
+
         
         while (-not $installConfirmed) {
-            $destFolder = Join-Path -Path $installBasePath -ChildPath $currentEffectName
-            # FIX: Removed assignment to unused variable 'destHtmlFile'
-            Join-Path -Path $destFolder -ChildPath ($currentEffectName + ".html") | Out-Null
+            
+            $itemExists = $false
+            $titleConflictFile = $null
+            $conflictMessage = "A conflict was found.`n`n"
 
-            # Get title from HTML
-            $currentEffectTitle = Get-EffectTitleFromHtml -HtmlFilePath $currentHtmlFile
-            # No fallback needed here, Get-EffectTitleFromHtml will return filename if title is missing
-            Write-Status "Effect Title (from HTML): $currentEffectTitle"
-            
-            # Check for conflicts
-            $folderExists = Test-Path -Path $destFolder
-            $titleConflictFile = Find-EffectTitleConflict -NewEffectTitle $currentEffectTitle -EffectsBasePath $installBasePath
-            
-            if ($folderExists -or $titleConflictFile) {
-                # Conflict found!
-                $conflictMessage = "A conflict was found.`n`n"
-                if ($folderExists) { $conflictMessage += "- Folder '$currentEffectName' already exists.`n" }
+            # --- Type-specific conflict logic ---
+            if ($installType -eq 'Effect') {
+                # Effects check for folder names AND <title> tags
+                $destFolder = Join-Path -Path $installBasePath -ChildPath $currentItemName
+                $itemExists = Test-Path -Path $destFolder
+                
+                $currentEffectTitle = Get-EffectTitleFromHtml -HtmlFilePath $sourceHtmlFile
+                Write-Status "Effect Title (from HTML): $currentEffectTitle"
+                $titleConflictFile = Find-EffectTitleConflict -NewEffectTitle $currentEffectTitle -EffectsBasePath $installBasePath
+                
+                if ($itemExists) { $conflictMessage += "- Folder '$currentItemName' already exists.`n" }
                 if ($titleConflictFile) { $conflictMessage += "- Title '$currentEffectTitle' is already used by `n  $titleConflictFile`n" }
+            }
+            elseif ($installType -eq 'Component') {
+                # --- SCRIPT FIX: Components check for .json file names ---
+                $destJsonFile = Join-Path -Path $installBasePath -ChildPath ($currentItemName + ".json")
+                $itemExists = Test-Path -Path $destJsonFile
+                Write-Status "Component Name (from file): $currentItemName"
+                
+                if ($itemExists) { $conflictMessage += "- File '$($currentItemName + ".json")' already exists.`n" }
+            }
+            
+            if ($itemExists -or $titleConflictFile) {
+                # Conflict found!
                 $conflictMessage += "`nWould you like to Overwrite, Rename, or Cancel?"
                 
                 Write-Status "Conflict detected: $conflictMessage"
@@ -975,37 +1181,36 @@ function Start-Installation {
                     Write-Status "User chose to Overwrite."
                     $isOverwrite = $true
                     $installConfirmed = $true
-                    
                 }
                 elseif ($userChoice -eq 'Rename') {
                     Write-Status "User chose to Rename."
-                    $newName = Show-RenameDialog -OldName $currentEffectName
+                    $newName = Show-RenameDialog -OldName $currentItemName
                     
-                    if ([string]::IsNullOrWhiteSpace($newName)) {
-                        Write-Status "Rename cancelled by user."
-                        return $false # Return false on user cancel
-                    }
-                    
-                    if ($newName.Equals($currentEffectName, [StringComparison]::OrdinalIgnoreCase)) {
-                        Write-Status "New name is the same as the old name. No changes made."
-                        # Loop will repeat
+                    if ([string]::IsNullOrWhiteSpace($newName) -or $newName.Equals($currentItemName, [StringComparison]::OrdinalIgnoreCase)) {
+                        Write-Status "Rename cancelled or name is unchanged."
+                        # If name is unchanged, loop will repeat. If null, we cancel.
+                        if ([string]::IsNullOrWhiteSpace($newName)) { return $false }
                         continue
                     }
 
                     Write-Status "New name selected: $newName"
-                    $currentEffectName = $newName
+                    $currentItemName = $newName
                     
-                    # Update HTML <title> tag
-                    Set-EffectTitleInHtml -HtmlFilePath $currentHtmlFile -NewTitle $newName | Out-Null
-                    # Note: We will re-read this new title at the start of the next loop.
-                    
+                    # --- Type-specific rename logic ---
+                    if ($installType -eq 'Effect') {
+                        # Update HTML <title> tag
+                        Set-EffectTitleInHtml -HtmlFilePath $sourceHtmlFile -NewTitle $newName | Out-Null
+                    }
+                    elseif ($installType -eq 'Component') {
+                        # Update JSON 'ProductName' and 'DisplayName' fields
+                        Set-ComponentNamesInJson -JsonFilePath $sourceJsonFile -NewName $newName | Out-Null
+                    }
                 }
                 else {
                     # User chose Cancel
                     Write-Status "Installation cancelled by user."
                     return $false # Return false on user cancel
                 }
-                
             }
             else {
                 # No conflict (New installation)
@@ -1015,52 +1220,73 @@ function Start-Installation {
         } # End conflict loop
 
         # 4. Perform Installation
-        Write-Status "Installing '$currentEffectName' to $destFolder"
         
-        # Ensure destination folder exists
-        if (-not (Test-Path -Path $destFolder)) {
+        # --- Type-specific file copy ---
+        if ($installType -eq 'Effect') {
+            # --- SCRIPT FIX: Create folder *inside* effect block ---
+            $destFolder = Join-Path -Path $installBasePath -ChildPath $currentItemName
+            Write-Status "Installing '$currentItemName' to $destFolder"
             New-Item -Path $destFolder -ItemType Directory -Force | Out-Null
-        }
-        
-        # Define final destination file paths
-        $finalHtmlPath = Join-Path -Path $destFolder -ChildPath ($currentEffectName + ".html")
-        $finalPngPath = Join-Path -Path $destFolder -ChildPath ($currentEffectName + ".png")
 
-        # Copy HTML
-        Copy-Item -Path $currentHtmlFile -Destination $finalHtmlPath -Force
-        Write-Status "Copied HTML to: $finalHtmlPath"
-        
-        # Copy PNG if it exists
-        if ($currentPngFile -and (Test-Path -Path $currentPngFile)) {
-            Copy-Item -Path $currentPngFile -Destination $finalPngPath -Force
-            Write-Status "Copied PNG to: $finalPngPath"
+            $finalHtmlPath = Join-Path -Path $destFolder -ChildPath ($currentItemName + ".html")
+            Copy-Item -Path $sourceHtmlFile -Destination $finalHtmlPath -Force
+            Write-Status "Copied HTML to: $finalHtmlPath"
+            
+            # 5. Set Registry Keys (Only for Effects)
+            $finalEffectTitle = Get-EffectTitleFromHtml -HtmlFilePath $finalHtmlPath
+            Set-ActiveEffectRegistryKeys -NewEffectTitle $finalEffectTitle
+            
+            # 6. Determine restart necessity (Only for Effects)
+            if (-not $isOverwrite) {
+                $restartRequired = $true
+                Write-Status "Installation finished. Restart is required for this effect."
+            }
+            else {
+                Write-Status "Overwrite finished. No restart required."
+            }
+        }
+        elseif ($installType -eq 'Component') {
+            # --- SCRIPT FIX: Install component as flat file ---
+            $finalJsonPath = Join-Path -Path $installBasePath -ChildPath ($currentItemName + ".json")
+            Write-Status "Installing '$currentItemName' to $finalJsonPath"
+            Copy-Item -Path $sourceJsonFile -Destination $finalJsonPath -Force
+            Write-Status "Copied JSON to: $finalJsonPath"
+            
+            # 6. Determine restart necessity (Components)
+            $restartRequired = $true # Components always require a restart
+            Write-Status "Component installation finished. Restart is required."
         }
         
-        # 5. Set Registry Keys (Always set the registry key to make it the active effect)
-        $finalEffectTitle = Get-EffectTitleFromHtml -HtmlFilePath $finalHtmlPath
-        
-        Set-ActiveEffectRegistryKeys -NewEffectTitle $finalEffectTitle
-        
-        # 6. Determine restart necessity
-        if (-not $isOverwrite) {
-            # A new installation or a rename occurred, so a restart is required.
-            $restartRequired = $true
-            Write-Status "Installation finished. Restart is required for this effect."
+        # --- Copy PNG (for both types, with correct paths) ---
+        $finalPngDestPath = $null
+        if ($installType -eq 'Effect') {
+            $destFolder = Join-Path -Path $installBasePath -ChildPath $currentItemName # Re-define for this scope
+            $finalPngDestPath = Join-Path -Path $destFolder -ChildPath ($currentItemName + ".png")
         }
-        else {
-            # It was an overwrite. Only registry change needed.
-            $restartRequired = $false
-            Write-Status "Overwrite finished. No restart required."
+        elseif ($installType -eq 'Component') {
+            $finalPngDestPath = Join-Path -Path $installBasePath -ChildPath ($currentItemName + ".png")
         }
         
-        [System.Windows.Forms.MessageBox]::Show("Effect '$currentEffectName' installed/updated successfully and set as active.", "Installation Complete", "OK", "Information") | Out-Null
+        if ($finalPngDestPath -and $sourcePngFile -and (Test-Path -Path $sourcePngFile)) {
+            Copy-Item -Path $sourcePngFile -Destination $finalPngDestPath -Force
+            Write-Status "Copied PNG to: $finalPngDestPath"
+        }
+        elseif ($sourcePngFile -and -not (Test-Path -Path $sourcePngFile)) {
+            Write-Status "No matching .png file found at $sourcePngFile. Skipping PNG copy."
+        }
+        
+        [System.Windows.Forms.MessageBox]::Show("'$currentItemName' ($installType) installed/updated successfully.", "Installation Complete", "OK", "Information") | Out-Null
         
         return $restartRequired
 
     }
     catch {
-        Write-Status "FATAL ERROR during installation: $($_.Exception.Message)"
-        [System.Windows.Forms.MessageBox]::Show("A fatal error occurred during installation of '$currentEffectName':`n$($_.Exception.Message)", "Fatal Error", "OK", "Error") | Out-Null
+        $errorMsg = $_.Exception.Message
+        Write-Status "FATAL ERROR during installation: $errorMsg"
+        if ($_.Exception.InnerException) {
+            Write-Status "INNER EXCEPTION: $($_.Exception.InnerException.Message)"
+        }
+        [System.Windows.Forms.MessageBox]::Show("A fatal error occurred during installation of '$currentItemName':`n$errorMsg", "Fatal Error", "OK", "Error") | Out-Null
         return $false # Return false on fatal error
     }
     finally {
@@ -1087,9 +1313,8 @@ if ($args.Count -gt 0) {
         if (Test-Path -Path $droppedFile -PathType Leaf) {
             $ext = [System.IO.Path]::GetExtension($droppedFile).ToLower()
             
-            if ($ext -eq ".zip" -or $ext -eq ".html") {
+            if ($ext -in @(".zip", ".html", ".json")) {
                 Write-Host "Processing: $droppedFile"
-
                 $restartNeeded = $false
                 
                 try {
@@ -1112,7 +1337,7 @@ if ($args.Count -gt 0) {
     
     # Final Restart Prompt (if at least one installed file required it)
     if ($batchRestartRequired) {
-        $restartResult = [System.Windows.Forms.MessageBox]::Show("Batch installation complete.`n`n$AppName must be restarted to load the new effect(s). Restart now?", "Restart Required", "YesNo", "Question")
+        $restartResult = [System.Windows.Forms.MessageBox]::Show("Batch installation complete.`n`n$AppName must be restarted to load the new item(s). Restart now?", "Restart Required", "YesNo", "Question")
         
         if ($restartResult -eq 'Yes') {
             Write-Host "User chose to restart."
@@ -1126,7 +1351,7 @@ if ($args.Count -gt 0) {
         }
     }
     else {
-         [System.Windows.Forms.MessageBox]::Show("Batch installation complete. No restart was required.", "Installation Complete", "OK", "Information") | Out-Null
+        [System.Windows.Forms.MessageBox]::Show("Batch installation complete. No restart was required.", "Installation Complete", "OK", "Information") | Out-Null
     }
 
     # Exit the script after a successful headless install
@@ -1141,11 +1366,12 @@ if ($args.Count -gt 0) {
 
 # --- Main Form ---
 $Global:mainForm = New-Object System.Windows.Forms.Form
-$Global:mainForm.Text = "SignalRGB Effect Installer"
-$Global:mainForm.Size = New-Object System.Drawing.Size(650, 500) # Increased width from 640
+$Global:mainForm.Text = "SignalRGB Effect & Component Installer"
+$Global:mainForm.Size = New-Object System.Drawing.Size(650, 500) 
 $Global:mainForm.FormBorderStyle = 'FixedSingle'
 $Global:mainForm.MaximizeBox = $false
 $Global:mainForm.StartPosition = 'CenterScreen'
+$Global:mainForm.ShowInTaskbar = $true
 
 # --- Main Layout Table ---
 $mainLayout = New-Object System.Windows.Forms.TableLayoutPanel
@@ -1194,14 +1420,14 @@ $fileInputLayout = New-Object System.Windows.Forms.TableLayoutPanel
 $fileInputLayout.Dock = 'Fill'
 $fileInputLayout.AutoSize = $true
 $fileInputLayout.ColumnCount = 3
-$fileInputLayout.RowCount = 3
+$fileInputLayout.RowCount = 4
 $fileInputLayout.ColumnStyles.Add((New-Object System.Windows.Forms.ColumnStyle([System.Windows.Forms.SizeType]::AutoSize))) | Out-Null
 $fileInputLayout.ColumnStyles.Add((New-Object System.Windows.Forms.ColumnStyle([System.Windows.Forms.SizeType]::Percent, 100))) | Out-Null
-$fileInputLayout.ColumnStyles.Add((New-Object System.Windows.Forms.ColumnStyle([System.Windows.Forms.SizeType]::Absolute, 95))) | Out-Null # Increased from 85
+$fileInputLayout.ColumnStyles.Add((New-Object System.Windows.Forms.ColumnStyle([System.Windows.Forms.SizeType]::Absolute, 95))) | Out-Null
 $mainLayout.Controls.Add($fileInputLayout, 0, 1)
 
 $lblFile = New-Object System.Windows.Forms.Label
-$lblFile.Text = "Effect File:"
+$lblFile.Text = "Install File(s):" # MODIFIED
 $lblFile.Dock = 'Fill'
 $lblFile.TextAlign = 'MiddleLeft'
 $lblFile.Margin = [System.Windows.Forms.Padding]::new(0, 0, 5, 0)
@@ -1214,21 +1440,21 @@ $fileInputLayout.Controls.Add($txtFilePath, 1, 0)
 
 $btnBrowse = New-Object System.Windows.Forms.Button
 $btnBrowse.Text = "Browse..."
-$btnBrowse.Dock = 'None' # Changed from Fill
-$btnBrowse.AutoSize = $true # Let button size to its text
-$btnBrowse.Anchor = 'Top, Left' # Set Anchor
+$btnBrowse.Dock = 'None' 
+$btnBrowse.AutoSize = $true 
+$btnBrowse.Anchor = 'Top, Left'
 $btnBrowse.Margin = [System.Windows.Forms.Padding]::new(5, 0, 0, 0)
 $fileInputLayout.Controls.Add($btnBrowse, 2, 0)
 
 $lblHint = New-Object System.Windows.Forms.Label
-$lblHint.Text = "Drag-and-drop a .zip or .html file here, or click Browse."
+$lblHint.Text = "Drag-and-drop a .zip, .html, or .json file here, or click Browse." # MODIFIED
 $lblHint.Font = New-Object System.Drawing.Font("Segoe UI", 9, [System.Drawing.FontStyle]::Italic)
 $lblHint.Dock = 'Fill'
 $lblHint.Margin = [System.Windows.Forms.Padding]::new(0, 0, 0, 5)
 $fileInputLayout.Controls.Add($lblHint, 1, 1) # Span 2
 $fileInputLayout.SetColumnSpan($lblHint, 2)
 
-# --- NEW: Add LinkLabel for Effect Builder ---
+# --- Add LinkLabel for Effect Builder ---
 $lnkBuilder = New-Object System.Windows.Forms.LinkLabel
 $lnkBuilder.Text = "Create your own effects with the Effect Builder"
 # Link starts at char 32 ("Effect Builder"), length 14
@@ -1249,43 +1475,77 @@ $lnkBuilder.Add_LinkClicked({
             Write-Status "ERROR: Could not open URL: $($e.Link.LinkData)"
         }
     })
+
+# --- NEW: Add LinkLabel for Component Builder ---
+$lnkComponentBuilder = New-Object System.Windows.Forms.LinkLabel
+$lnkComponentBuilder.Text = "Create your own components with the Component Builder"
+# Link starts at char 35 ("Component Builder"), length 17
+$lnkComponentBuilder.Links.Add(35, 17, "https://effectbuilder.github.io/builder/") | Out-Null 
+$lnkComponentBuilder.Dock = 'Fill'
+$lnkComponentBuilder.TextAlign = 'MiddleLeft'
+$lnkComponentBuilder.Margin = [System.Windows.Forms.Padding]::new(0, 0, 0, 5)
+$fileInputLayout.Controls.Add($lnkComponentBuilder, 1, 3) # Add to new row 3
+$fileInputLayout.SetColumnSpan($lnkComponentBuilder, 2)
+
+$lnkComponentBuilder.Add_LinkClicked({
+        param($s, $e)
+        try {
+            [System.Diagnostics.Process]::Start($e.Link.LinkData)
+            $e.Link.Visited = $true
+        }
+        catch {
+            Write-Status "ERROR: Could not open URL: $($e.Link.LinkData)"
+        }
+    })
 # --- End of NEW LinkLabel ---
+# --- End of LinkLabel ---
 
 
 # --- Row 2: Buttons ---
 $buttonLayout = New-Object System.Windows.Forms.TableLayoutPanel
 $buttonLayout.Dock = 'Fill'
 $buttonLayout.AutoSize = $true
-$buttonLayout.ColumnCount = 3 # Install, Uninstall, Spacer
+$buttonLayout.ColumnCount = 4 # --- SCRIPT FIX: Increased to 4 ---
 $buttonLayout.RowCount = 1
-$buttonLayout.RowStyles.Add((New-Object System.Windows.Forms.RowStyle([System.Windows.Forms.SizeType]::AutoSize))) | Out-Null # Added this line
-$buttonLayout.ColumnStyles.Add((New-Object System.Windows.Forms.ColumnStyle([System.Windows.Forms.SizeType]::Percent, 33.3))) | Out-Null
-$buttonLayout.ColumnStyles.Add((New-Object System.Windows.Forms.ColumnStyle([System.Windows.Forms.SizeType]::Percent, 33.3))) | Out-Null
-$buttonLayout.ColumnStyles.Add((New-Object System.Windows.Forms.ColumnStyle([System.Windows.Forms.SizeType]::Percent, 33.3))) | Out-Null
+$buttonLayout.RowStyles.Add((New-Object System.Windows.Forms.RowStyle([System.Windows.Forms.SizeType]::AutoSize))) | Out-Null
+# --- SCRIPT FIX: Set to 4 columns at 25% ---
+$buttonLayout.ColumnStyles.Clear()
+$buttonLayout.ColumnStyles.Add((New-Object System.Windows.Forms.ColumnStyle([System.Windows.Forms.SizeType]::Percent, 25))) | Out-Null
+$buttonLayout.ColumnStyles.Add((New-Object System.Windows.Forms.ColumnStyle([System.Windows.Forms.SizeType]::Percent, 25))) | Out-Null
+$buttonLayout.ColumnStyles.Add((New-Object System.Windows.Forms.ColumnStyle([System.Windows.Forms.SizeType]::Percent, 25))) | Out-Null
+$buttonLayout.ColumnStyles.Add((New-Object System.Windows.Forms.ColumnStyle([System.Windows.Forms.SizeType]::Percent, 25))) | Out-Null
 $buttonLayout.Margin = [System.Windows.Forms.Padding]::new(0, 5, 0, 10)
 $mainLayout.Controls.Add($buttonLayout, 0, 2)
 
 $btnInstall = New-Object System.Windows.Forms.Button
-$btnInstall.Text = "Install Effect"
-$btnInstall.Dock = 'None' # Changed from Fill
-$btnInstall.Anchor = 'Top, Left, Right' # Added Anchor
-$btnInstall.Height = 30 # Reduced height
+$btnInstall.Text = "Install Item(s)" # MODIFIED
+$btnInstall.Dock = 'None' 
+$btnInstall.Anchor = 'Top, Left, Right' 
+$btnInstall.Height = 30 
 $buttonLayout.Controls.Add($btnInstall, 0, 0)
 
 $btnUninstall = New-Object System.Windows.Forms.Button
-$btnUninstall.Text = "Uninstall an Effect..."
-$btnUninstall.Dock = 'None' # Changed from Fill
-$btnUninstall.Anchor = 'Top, Left, Right' # Added Anchor
-$btnUninstall.Height = 30 # Reduced height
+$btnUninstall.Text = "Uninstall an Item..." # MODIFIED
+$btnUninstall.Dock = 'None' 
+$btnUninstall.Anchor = 'Top, Left, Right' 
+$btnUninstall.Height = 30 
 $buttonLayout.Controls.Add($btnUninstall, 1, 0)
 
-# --- NEW: Disclaimer Button ---
+# --- Disclaimer Button ---
 $btnDisclaimer = New-Object System.Windows.Forms.Button
 $btnDisclaimer.Text = "Disclaimer..."
 $btnDisclaimer.Dock = 'None'
 $btnDisclaimer.Anchor = 'Top, Left, Right'
 $btnDisclaimer.Height = 30
 $buttonLayout.Controls.Add($btnDisclaimer, 2, 0)
+
+# --- NEW: Open Folder Button ---
+$btnOpenFolder = New-Object System.Windows.Forms.Button
+$btnOpenFolder.Text = "Open WhirlwindFX Folder"
+$btnOpenFolder.Dock = 'None'
+$btnOpenFolder.Anchor = 'Top, Left, Right'
+$btnOpenFolder.Height = 30
+$buttonLayout.Controls.Add($btnOpenFolder, 3, 0)
 
 # --- Row 3: Status Box ---
 $script:txtStatus = New-Object System.Windows.Forms.TextBox
@@ -1298,9 +1558,6 @@ $mainLayout.Controls.Add($script:txtStatus, 0, 3)
 
 # --- Form and Control Event Handlers ---
 
-# --- FIX: Changed from Add_Load to Add_Shown ---
-# Add_Shown fires *after* the form is visible and the handle is created,
-# preventing the BeginInvoke error.
 $Global:mainForm.Add_Shown({
         # Logging will work here as the form is visible and the handle is created
         Write-Status "Application started."
@@ -1358,9 +1615,11 @@ $Global:mainForm.Add_Shown({
         try {
             Write-Status "Reading registry key: $RegKey"
             $userDir = (Get-ItemProperty -Path $RegKey -Name $RegValue).$RegValue
-            Write-Status "Found folder: $userDir"
+            Write-Status "Found SignalRGB User Directory: $userDir"
             $effectsDir = Join-Path -Path $userDir -ChildPath $EffectsSubFolder
+            $componentsDir = Join-Path -Path $userDir -ChildPath $ComponentsSubFolder
             Write-Status "Effect install directory set to: $effectsDir"
+            Write-Status "Component install directory set to: $componentsDir"
         }
         catch {
             Write-Status "ERROR: Could not read SignalRGB registry key on startup."
@@ -1373,10 +1632,10 @@ $txtFilePath.Add_DragEnter({
         if ($e.Data.GetDataPresent([System.Windows.Forms.DataFormats]::FileDrop)) {
             $files = $e.Data.GetData([System.Windows.Forms.DataFormats]::FileDrop)
         
-            # Check if at least one of the dropped files is a valid type (.zip or .html)
+            # MODIFIED: Check for .json as well
             $hasValidFile = $files | Where-Object { 
                 $ext = [System.IO.Path]::GetExtension($_).ToLower()
-                $ext -eq ".zip" -or $ext -eq ".html"
+                $ext -in @(".zip", ".html", ".json")
             }
         
             if ($hasValidFile) {
@@ -1394,8 +1653,9 @@ $txtFilePath.Add_DragDrop({
             $validFiles = @()
         
             foreach ($file in $files) {
+                # MODIFIED: Check for .json as well
                 $ext = [System.IO.Path]::GetExtension($file).ToLower()
-                if ($ext -eq ".zip" -or $ext -eq ".html") {
+                if ($ext -in @(".zip", ".html", ".json")) {
                     $validFiles += $file
                 }
                 else {
@@ -1409,10 +1669,10 @@ $txtFilePath.Add_DragDrop({
                 Write-Status "Files selected by drag-drop: $($validFiles.Count) valid files selected."
             
                 # Since multiple files are selected, update the hint label to prompt the user to click Install
-                $lblHint.Text = "Multiple files loaded. Click **'Install Effect'** to process them sequentially."
+                $lblHint.Text = "Multiple files loaded. Click **'Install Item(s)'** to process them sequentially."
             }
             else {
-                Write-Status "No valid .zip or .html files were dropped."
+                Write-Status "No valid .zip, .html, or .json files were dropped."
                 $txtFilePath.Text = ""
             }
         }
@@ -1421,10 +1681,10 @@ $txtFilePath.Add_DragDrop({
 # Browse Button
 $btnBrowse.Add_Click({
         $openFileDialog = New-Object System.Windows.Forms.OpenFileDialog
-        $openFileDialog.Filter = "Effect Files (*.zip, *.html)|*.zip;*.html|All Files (*.*)|*.*"
-        $openFileDialog.Title = "Select Effect File(s)"
+        # MODIFIED: Updated filter to include .json
+        $openFileDialog.Filter = "SignalRGB Files (*.zip, *.html, *.json)|*.zip;*.html;*.json|All Files (*.*)|*.*"
+        $openFileDialog.Title = "Select Effect or Component File(s)"
     
-        # *** MODIFICATION: Set Multiselect property to allow multiple files ***
         $openFileDialog.Multiselect = $true
     
         if ($openFileDialog.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) {
@@ -1434,8 +1694,9 @@ $btnBrowse.Add_Click({
             # Filter for valid file types and join them with the semicolon separator
             $validFiles = @()
             foreach ($file in $selectedFiles) {
+                # MODIFIED: Check for .json as well
                 $ext = [System.IO.Path]::GetExtension($file).ToLower()
-                if ($ext -eq ".zip" -or $ext -eq ".html") {
+                if ($ext -in @(".zip", ".html", ".json")) {
                     $validFiles += $file
                 }
             }
@@ -1447,14 +1708,14 @@ $btnBrowse.Add_Click({
             
                 # Update hint label to match batch installation mode
                 if ($validFiles.Count -gt 1) {
-                    $lblHint.Text = "Multiple files loaded. Click **'Install Effect'** to process them sequentially."
+                    $lblHint.Text = "Multiple files loaded. Click **'Install Item(s)'** to process them sequentially."
                 }
                 else {
-                    $lblHint.Text = "Drag-and-drop a .zip or .html file here, or click Browse."
+                    $lblHint.Text = "Drag-and-drop a .zip, .html, or .json file here, or click Browse."
                 }
             }
             else {
-                [System.Windows.Forms.MessageBox]::Show("You must select at least one .zip or .html file.", "No Valid Selection", "OK", "Warning") | Out-Null
+                [System.Windows.Forms.MessageBox]::Show("You must select at least one .zip, .html, or .json file.", "No Valid Selection", "OK", "Warning") | Out-Null
                 $txtFilePath.Text = ""
                 Write-Status "Browse operation canceled or no valid files selected."
             }
@@ -1506,8 +1767,8 @@ $btnInstall.Add_Click({
         
             # FINAL RESTART PROMPT (Only executed if at least one file needed a restart)
             if ($batchRestartRequired) {
-                Write-Status "One or more new/renamed effects were installed. Prompting user to restart $AppName."
-                $restartResult = [System.Windows.Forms.MessageBox]::Show("All files processed.`n`n$AppName must be restarted to load the new effect(s). Restart now?", "Restart Required", "YesNo", "Question")
+                Write-Status "One or more new items were installed. Prompting user to restart $AppName."
+                $restartResult = [System.Windows.Forms.MessageBox]::Show("All files processed.`n`n$AppName must be restarted to load the new item(s). Restart now?", "Restart Required", "YesNo", "Question")
             
                 if ($restartResult -eq 'Yes') {
                     Write-Status "User chose to restart."
@@ -1524,13 +1785,13 @@ $btnInstall.Add_Click({
                     }
                     catch {
                         Write-Status "WARNING: Could not stop $AppName. It may be running as Administrator."
-                        Write-Status "Please restart $AppName manually to see the new effect(s)."
-                        [System.Windows.Forms.MessageBox]::Show("Could not stop $AppName (it may be running as Administrator).`n`nPlease restart it manually to see the new effect(s).", "Restart Failed", "OK", "Warning") | Out-Null
+                        Write-Status "Please restart $AppName manually to see the new item(s)."
+                        [System.Windows.Forms.MessageBox]::Show("Could not stop $AppName (it may be running as Administrator).`n`nPlease restart it manually to see the new item(s).", "Restart Failed", "OK", "Warning") | Out-Null
                     }
                 }
                 else {
                     Write-Status "User declined automatic restart. Manual restart required."
-                    [System.Windows.Forms.MessageBox]::Show("Batch installation complete.`n`nManual restart of $AppName is required to see all new effect(s).", "Manual Restart Needed", "OK", "Information") | Out-Null
+                    [System.Windows.Forms.MessageBox]::Show("Batch installation complete.`n`nManual restart of $AppName is required to see all new item(s).", "Manual Restart Needed", "OK", "Information") | Out-Null
                 }
             }
             else {
@@ -1545,11 +1806,11 @@ $btnInstall.Add_Click({
         finally {
             # Re-enable button
             $btnInstall.Enabled = $true
-            $btnInstall.Text = "Install Effect"
+            $btnInstall.Text = "Install Item(s)" # MODIFIED
         
             # Clear text box after batch installation is complete
             $txtFilePath.Text = ""
-            $lblHint.Text = "Drag-and-drop a .zip or .html file here, or click Browse. Multiple files allowed."
+            $lblHint.Text = "Drag-and-drop a .zip, .html, or .json file here, or click Browse." # MODIFIED
         }
     })
 
@@ -1557,18 +1818,40 @@ $btnInstall.Add_Click({
 $btnUninstall.Add_Click({
         try {
             $userDir = (Get-ItemProperty -Path $RegKey -Name $RegValue).$RegValue
-            $effectsDir = Join-Path -Path $userDir -ChildPath $EffectsSubFolder
-            Show-UninstallWindow -EffectsBasePath $effectsDir
+            # MODIFIED: Pass the base UserDirectory to the uninstall window
+            Show-UninstallWindow -UserDirectory $userDir
         }
         catch {
-            Write-Status "ERROR: Could not get effects directory for uninstaller. $($_.Exception.Message)"
-            [System.Windows.Forms.MessageBox]::Show("Could not find the SignalRGB Effects directory.`nHave you run SignalRGB at least once?", "Error", "OK", "Error") | Out-Null
+            Write-Status "ERROR: Could not get SignalRGB User Directory for uninstaller. $($_.Exception.Message)"
+            [System.Windows.Forms.MessageBox]::Show("Could not find the SignalRGB User Directory.`nHave you run SignalRGB at least once?", "Error", "OK", "Error") | Out-Null
         }
     })
 
-# --- NEW: Disclaimer Button Event Handler ---
+# Disclaimer Button
 $btnDisclaimer.Add_Click({
         Show-DisclaimerWindow
+    })
+
+# --- NEW: Open Folder Button Event Handler ---
+$btnOpenFolder.Add_Click({
+        Write-Status "Attempting to open user folder..."
+        $userDir = $null
+        try {
+            $userDir = (Get-ItemProperty -Path $RegKey -Name $RegValue).$RegValue
+            
+            if ($userDir -and (Test-Path -Path $userDir)) {
+                Write-Status "Opening folder in Explorer: $userDir"
+                Invoke-Item -Path $userDir
+            }
+            else {
+                Write-Status "ERROR: WhirlwindFX folder path not found or is invalid: $userDir"
+                [System.Windows.Forms.MessageBox]::Show("Could not find the WhirlwindFX folder path from the registry.", "Error", "OK", "Error") | Out-Null
+            }
+        }
+        catch {
+            Write-Status "ERROR: Could not read registry key to find folder. $($_.Exception.Message)"
+            [System.Windows.Forms.MessageBox]::Show("Could not read the registry to find the SignalRGB User Directory.", "Error", "OK", "Error") | Out-Null
+        }
     })
 
 # --- Show the Form ---
