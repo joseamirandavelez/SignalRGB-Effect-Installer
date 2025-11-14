@@ -73,8 +73,10 @@ function Write-Status {
         $timestamp = Get-Date -Format "HH:mm:ss"
         $formattedMessage = "$timestamp - $Type - $Message`r`n"
         
+        # --- MODIFICATION ---
         # Use BeginInvoke for thread-safe UI updates
-        $script:txtStatus.BeginInvoke([Action[string]] {
+        # Cast to [void] to prevent the IAsyncResult object from leaking to the pipeline
+        [void]$script:txtStatus.BeginInvoke([Action[string]] {
                 param ($msg)
                 $script:txtStatus.AppendText($msg)
                 $script:txtStatus.ScrollToCaret()
@@ -402,6 +404,10 @@ function Show-UninstallWindow {
     $clbComponents.Dock = 'Fill'
     $clbComponents.CheckOnClick = $true
     $clbComponents.Margin = [System.Windows.Forms.Padding]::new(5, 3, 0, 0) # Add margin to the left
+    
+    # --- MODIFICATION: Tell the listbox which property to display ---
+    $clbComponents.DisplayMember = "DisplayName"
+    
     $componentsLayout.Controls.Add($clbComponents, 0, 1)
     # --- End of layout change ---
 
@@ -438,10 +444,26 @@ function Show-UninstallWindow {
         Write-Status "Refreshing component list from: $componentsBasePath"
         if (Test-Path -Path $componentsBasePath) {
             try {
-                $components = Get-ChildItem -Path $componentsBasePath -Filter "*.json" | ForEach-Object { $_.Name } | Sort-Object
-                $clbComponents.Items.AddRange($components)
-                $totalItems += $components.Count
-                Write-Status "Found $($components.Count) components."
+                # --- MODIFICATION: Get component names from JSON files ---
+                $componentFiles = Get-ChildItem -Path $componentsBasePath -Filter "*.json"
+                $componentList = @()
+                
+                foreach ($file in $componentFiles) {
+                    $displayName = Get-ComponentNameFromJson -JsonFilePath $file.FullName
+                    # Store an object with both the display name and the real filename
+                    $componentList += [PSCustomObject]@{
+                        DisplayName = $displayName
+                        FileName    = $file.Name # e.g., "MyComponent.json"
+                    }
+                }
+                
+                # Sort the list of objects by their display name
+                $sortedList = $componentList | Sort-Object -Property DisplayName
+                
+                $clbComponents.Items.AddRange($sortedList)
+                $totalItems += $sortedList.Count
+                Write-Status "Found $($sortedList.Count) components."
+                # --- End of MODIFICATION ---
             }
             catch {
                 Write-Status "ERROR scanning for components: $($_.Exception.Message)"
@@ -465,10 +487,13 @@ function Show-UninstallWindow {
             foreach ($item in $clbEffects.CheckedItems) {
                 $selectedItems += "[Effect] $item"
             }
+            
+            # --- MODIFICATION: Get the FileName property from the selected object ---
             foreach ($item in $clbComponents.CheckedItems) {
-                $selectedItems += "[Component] $item"
+                # $item is now a PSCustomObject
+                $selectedItems += "[Component] $($item.FileName)"
             }
-            # --- End of script change ---
+            # --- End of MODIFICATION ---
             
             if ($selectedItems.Count -eq 0) {
                 [System.Windows.Forms.MessageBox]::Show("Please select one or more items to delete.", "No Selection", "OK", "Information") | Out-Null
@@ -649,6 +674,74 @@ function Get-EffectTitleFromHtml {
     }
 }
 
+function Get-ComponentNameFromJson {
+    param (
+        [string]$JsonFilePath
+    )
+    
+    # Fallback name is the filename
+    $fallbackName = [System.IO.Path]::GetFileName($JsonFilePath)
+    
+    try {
+        # Remove non-breaking space characters (U+00A0) before parsing
+        $jsonString = (Get-Content -Path $JsonFilePath -Raw) -replace "\u00A0", " "
+        $content = $jsonString | ConvertFrom-Json
+        
+        if ($content.PSObject.Properties.Name -contains 'ProductName' -and -not [string]::IsNullOrWhiteSpace($content.ProductName)) {
+            # Return the internal product name
+            return $content.ProductName.Trim()
+        }
+        else {
+            Write-Status "WARNING: No 'ProductName' in $JsonFilePath. Using filename as display name."
+            return $fallbackName
+        }
+    }
+    catch {
+        Write-Status "ERROR: Could not parse $JsonFilePath to find component name. Using filename. $($_.Exception.Message)"
+        return $fallbackName
+    }
+}
+
+function Find-ComponentConflict {
+    param (
+        [string]$NewComponentJsonPath,
+        [string]$ComponentsBasePath
+    )
+    
+    # 1. Get the product name from the new file
+    $newProductName = Get-ComponentNameFromJson -JsonFilePath $NewComponentJsonPath
+    if ($newProductName -eq [System.IO.Path]::GetFileName($NewComponentJsonPath)) {
+        # Get-ComponentNameFromJson returns filename on failure.
+        # If it fails to parse the *new* file, we can't check for product name conflicts.
+        Write-Status "Could not parse new component, skipping product name conflict check."
+        return $null 
+    }
+    
+    if (-not (Test-Path -Path $ComponentsBasePath)) {
+        return $null # No components folder, so no conflict
+    }
+    
+    # 2. Iterate through all existing component files
+    $allJsonFiles = Get-ChildItem -Path $ComponentsBasePath -Recurse -Filter "*.json"
+    foreach ($file in $allJsonFiles) {
+        
+        # Don't compare the file against itself (this handles drag-dropping a file from its install location)
+        if ($file.FullName -eq $NewComponentJsonPath) {
+            continue
+        }
+
+        $existingProductName = Get-ComponentNameFromJson -JsonFilePath $file.FullName
+        
+        if ($existingProductName -and ($newProductName.Equals($existingProductName, [StringComparison]::OrdinalIgnoreCase))) {
+            # Found a match! Return the path of the *existing* file.
+            Write-Status "Product name conflict found: '$newProductName' is used by $($file.Name)"
+            return $file.FullName 
+        }
+    }
+    
+    return $null # No conflict found
+}
+
 function Find-EffectTitleConflict {
     param (
         [string]$NewEffectTitle,
@@ -697,7 +790,10 @@ function Show-ConflictDialog {
     $lblMessage = New-Object System.Windows.Forms.Label
     $lblMessage.Text = $Message
     $lblMessage.Dock = 'Fill'
-    $lblMessage.TextAlign = 'MiddleCenter'
+    
+    # --- MODIFICATION ---
+    $lblMessage.TextAlign = 'MiddleLeft' # Was 'MiddleCenter'
+    
     $mainLayout.Controls.Add($lblMessage, 0, 0)
 
     $buttonLayout = New-Object System.Windows.Forms.TableLayoutPanel
@@ -1144,33 +1240,46 @@ function Start-Installation {
         
         while (-not $installConfirmed) {
             
-            $itemExists = $false
             $titleConflictFile = $null
+            $productNameConflictFile = $null
+            $fileNameConflict = $false
             $conflictMessage = "A conflict was found.`n`n"
 
             # --- Type-specific conflict logic ---
             if ($installType -eq 'Effect') {
                 # Effects check for folder names AND <title> tags
                 $destFolder = Join-Path -Path $installBasePath -ChildPath $currentItemName
-                $itemExists = Test-Path -Path $destFolder
+                $fileNameConflict = Test-Path -Path $destFolder # For effects, "fileNameConflict" means folder name conflict
                 
                 $currentEffectTitle = Get-EffectTitleFromHtml -HtmlFilePath $sourceHtmlFile
                 Write-Status "Effect Title (from HTML): $currentEffectTitle"
                 $titleConflictFile = Find-EffectTitleConflict -NewEffectTitle $currentEffectTitle -EffectsBasePath $installBasePath
                 
-                if ($itemExists) { $conflictMessage += "- Folder '$currentItemName' already exists.`n" }
-                if ($titleConflictFile) { $conflictMessage += "- Title '$currentEffectTitle' is already used by `n  $titleConflictFile`n" }
+                if ($fileNameConflict) { $conflictMessage += "- Folder '$currentItemName' already exists.`n" }
+                
+                # --- MODIFICATION ---
+                if ($titleConflictFile) { $conflictMessage += "- Title '$currentEffectTitle' is already used by `n  $(Split-Path $titleConflictFile -Leaf)`n" }
             }
             elseif ($installType -eq 'Component') {
-                # --- SCRIPT FIX: Components check for .json file names ---
+                # --- MODIFIED COMPONENT CONFLICT LOGIC ---
                 $destJsonFile = Join-Path -Path $installBasePath -ChildPath ($currentItemName + ".json")
-                $itemExists = Test-Path -Path $destJsonFile
-                Write-Status "Component Name (from file): $currentItemName"
+                $fileNameConflict = Test-Path -Path $destJsonFile # This is a file name conflict
                 
-                if ($itemExists) { $conflictMessage += "- File '$($currentItemName + ".json")' already exists.`n" }
+                # Check for *internal* product name conflict
+                $componentName = Get-ComponentNameFromJson -JsonFilePath $sourceJsonFile
+                $productNameConflictFile = Find-ComponentConflict -NewComponentJsonPath $sourceJsonFile -ComponentsBasePath $installBasePath
+                
+                # If product name matches, but it's the *same file*, just show the file conflict.
+                if ($productNameConflictFile -and $fileNameConflict -and ($productNameConflictFile -eq $destJsonFile)) {
+                    $productNameConflictFile = $null
+                }
+
+                if ($fileNameConflict) { $conflictMessage += "- File '$($currentItemName + ".json")' already exists.`n" }
+                if ($productNameConflictFile) { $conflictMessage += "- Component Name '$componentName' is already used by `n  $(Split-Path $productNameConflictFile -Leaf)`n" }
+                # --- END MODIFIED LOGIC ---
             }
             
-            if ($itemExists -or $titleConflictFile) {
+            if ($fileNameConflict -or $titleConflictFile -or $productNameConflictFile) { # MODIFIED to include product name
                 # Conflict found!
                 $conflictMessage += "`nWould you like to Overwrite, Rename, or Cancel?"
                 
@@ -1179,6 +1288,37 @@ function Start-Installation {
                 
                 if ($userChoice -eq 'Overwrite') {
                     Write-Status "User chose to Overwrite."
+                    
+                    # --- NEW: Handle component product name conflict on Overwrite ---
+                    # This deletes the *old* file that has the conflicting name.
+                    if ($installType -eq 'Component' -and $productNameConflictFile) {
+                        $oldJsonPath = $productNameConflictFile
+                        $oldPngPath = Join-Path -Path (Split-Path $oldJsonPath) -ChildPath "$([System.IO.Path]::GetFileNameWithoutExtension($oldJsonPath)).png"
+
+                        Write-Status "Overwrite: Deleting old conflicting component file: $(Split-Path $oldJsonPath -Leaf)"
+                        try {
+                            [Microsoft.VisualBasic.FileIO.FileSystem]::DeleteFile(
+                                $oldJsonPath, 
+                                [Microsoft.VisualBasic.FileIO.UIOption]::OnlyErrorDialogs, 
+                                [Microsoft.VisualBasic.FileIO.RecycleOption]::SendToRecycleBin)
+                            
+                            if (Test-Path -Path $oldPngPath) {
+                                Write-Status "Overwrite: Deleting old matching PNG: $(Split-Path $oldPngPath -Leaf)"
+                                [Microsoft.VisualBasic.FileIO.FileSystem]::DeleteFile(
+                                    $oldPngPath, 
+                                    [Microsoft.VisualBasic.FileIO.UIOption]::OnlyErrorDialogs, 
+                                    [Microsoft.VisualBasic.FileIO.RecycleOption]::SendToRecycleBin)
+                            }
+                            Write-Status "Successfully recycled old component files."
+                        }
+                        catch {
+                            Write-Status "ERROR: Could not delete old conflicting component '($productNameConflictFile)'. $($_.Exception.Message)"
+                            [System.Windows.Forms.MessageBox]::Show("Error: Could not delete the old conflicting file '$productNameConflictFile'.`nInstallation aborted.", "Error", "OK", "Error") | Out-Null
+                            return $false # Abort installation
+                        }
+                    }
+                    # --- END NEW LOGIC ---
+                    
                     $isOverwrite = $true
                     $installConfirmed = $true
                 }
