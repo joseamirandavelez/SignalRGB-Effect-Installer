@@ -1,7 +1,7 @@
 #Requires -Version 5.1
 
 # --- Versioning ---
-$ScriptVersion = "1.7"
+$ScriptVersion = "1.6"
 $RepoOwner = "joseamirandavelez"
 $RepoName = "SRGB-Effect-Installer"
 
