@@ -1,10 +1,31 @@
 #Requires -Version 5.1
 
+# --- Versioning ---
+$ScriptVersion = "1.7"
+$RepoOwner = "joseamirandavelez"
+$RepoName = "SRGB-Effect-Installer"
+
 # --- Load Windows Forms Assembly ---
 # Load these first to ensure all UI elements (even error popups) get modern styling
 Add-Type -AssemblyName System.Windows.Forms
 Add-Type -AssemblyName System.Drawing
 Add-Type -AssemblyName Microsoft.VisualBasic
+
+# --- ADD THIS BLOCK FOR DARK TITLE BAR ---
+try {
+    $dwmapiCode = @"
+    using System;
+    using System.Runtime.InteropServices;
+    public class DwmApi {
+        [DllImport("dwmapi.dll", PreserveSig = true)]
+        public static extern int DwmSetWindowAttribute(IntPtr hwnd, int attr, ref int attrValue, int attrSize);
+    }
+"@
+    Add-Type -TypeDefinition $dwmapiCode -Language CSharp
+}
+catch {
+    # Ignore error if type is already added in current session
+}
 
 # Set high DPI awareness and visual styles
 try {
@@ -29,10 +50,22 @@ $Global:ScriptFullPath = $null
 $Global:DesktopShortcutPath = $null
 $Global:StartMenuShortcutPath = $null
 $Global:SendToShortcutPath = $null
+$script:hue = 0 # NEW: Global variable for RGB animation
 
 try {
-    # Set global paths. This is more reliable than $PSScriptRoot
-    $Global:ScriptFullPath = $MyInvocation.MyCommand.Path
+    # Check if we are running as an EXE or a script
+    if ($PSModuleInfo -ne $null -or $MyInvocation.MyCommand.Path -ne $null) {
+        $Global:ScriptFullPath = $MyInvocation.MyCommand.Path
+    } else {
+        # Fallback for EXE wrappers or unconventional execution
+        $Global:ScriptFullPath = [System.Diagnostics.Process]::GetCurrentProcess().MainModule.FileName
+    }
+
+    # Ensure we actually got a path before trying to split it
+    if ($null -eq $Global:ScriptFullPath) {
+        throw "Script path could not be detected via standard methods."
+    }
+
     $Global:ScriptDirectory = Split-Path -Path $Global:ScriptFullPath -Parent
     
     # Define shortcut paths
@@ -43,7 +76,6 @@ try {
     $Global:DesktopShortcutPath = Join-Path -Path $desktopPath -ChildPath "Effect Installer.lnk"
     $Global:StartMenuShortcutPath = Join-Path -Path $startMenuPath -ChildPath "SignalRGB Tools\Effect Installer.lnk"
     $Global:SendToShortcutPath = Join-Path -Path $sendToPath -ChildPath "SignalRGB Installer.lnk"
-
 }
 catch {
     [System.Windows.Forms.MessageBox]::Show("CRITICAL ERROR: Could not determine script's own path. Shortcuts will fail. `n$($_.Exception.Message)", "Error", "OK", "Error")
@@ -61,6 +93,110 @@ $ComponentsSubFolder = "Components" # The subfolder for components
 Add-Type -AssemblyName System.IO.Compression.FileSystem
 
 # --- Helper Functions (Ensuring all are defined before first call) ---
+
+# --- NEW: RGB COLOR FUNCTION ---
+function Get-RGBColor {
+    param ([double]$Hue)
+    # Saturation 0.6, Lightness 0.15 (Deep/Dark color cycle)
+    $S = 0.6; $L = 0.15; $C = (1 - [Math]::Abs(2 * $L - 1)) * $S
+    $X = $C * (1 - [Math]::Abs(($Hue / 60) % 2 - 1)); $m = $L - $C / 2
+    
+    if ($Hue -lt 60) { $R = $C; $G = $X; $B = 0 }
+    elseif ($Hue -lt 120) { $R = $X; $G = $C; $B = 0 }
+    elseif ($Hue -lt 180) { $R = 0; $G = $C; $B = $X }
+    elseif ($Hue -lt 240) { $R = 0; $G = $X; $B = $C }
+    elseif ($Hue -lt 300) { $R = $X; $G = 0; $B = $C }
+    else { $R = $C; $G = 0; $B = $X }
+    
+    return [System.Drawing.Color]::FromArgb(255, [byte](($R + $m) * 255), [byte](($G + $m) * 255), [byte](($B + $m) * 255))
+}
+# --- END NEW RGB FUNCTION ---
+
+function Set-WindowDarkMode {
+    param([System.Windows.Forms.Form]$Form)
+    try {
+        $hwnd = $Form.Handle
+        [int]$attribute = 20 # DWMWA_USE_IMMERSIVE_DARK_MODE
+        [int]$value = 1      # True
+        # Call the API defined at the top of the script
+        [DwmApi]::DwmSetWindowAttribute($hwnd, $attribute, [ref]$value, 4)
+    }
+    catch {
+        # Fails silently on Windows 7/8
+    }
+}
+
+function Check-ForUpdates {
+    Write-Status "Checking for updates..."
+    
+    try {
+        [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+
+        # 1. Get Latest Release Info from GitHub
+        $apiUrl = "https://api.github.com/repos/$RepoOwner/$RepoName/releases/latest"
+        $latestRelease = Invoke-RestMethod -Uri $apiUrl -ErrorAction Stop
+
+        # 2. Compare Versions
+        $latestTag = $latestRelease.tag_name -replace "^v", ""
+        
+        if ([System.Version]$latestTag -gt [System.Version]$ScriptVersion) {
+            
+            $msg = "A new version (v$latestTag) is available.`n`nCurrent: $ScriptVersion`nNew: $latestTag`n`nUpdate now? The app will restart."
+            $result = [System.Windows.Forms.MessageBox]::Show($msg, "Update Available", "YesNo", "Information")
+
+            if ($result -eq 'Yes') {
+                Write-Status "Preparing update..."
+
+                # --- Find the EXE Asset (Looking for .exe instead of .zip) ---
+                $asset = $latestRelease.assets | Where-Object { $_.name -like "*.exe" } | Select-Object -First 1
+
+                if (-not $asset) {
+                    Write-Status "ERROR: No .exe asset found in release v$latestTag."
+                    [System.Windows.Forms.MessageBox]::Show("Update failed: No executable file found in the latest release.", "Error", "OK", "Error") | Out-Null
+                    return
+                }
+
+                $downloadUrl = $asset.browser_download_url
+                
+                # Get the path of the currently running EXE
+                $currentExe = [System.Diagnostics.Process]::GetCurrentProcess().MainModule.FileName
+                $tempExe = Join-Path -Path ([System.IO.Path]::GetTempPath()) -ChildPath "SignalRGB_Update.exe"
+
+                # 3. Download the new EXE to Temp
+                Write-Status "Downloading update..."
+                try {
+                    Invoke-WebRequest -Uri $downloadUrl -OutFile $tempExe -ErrorAction Stop
+                }
+                catch {
+                    Write-Status "Download failed: $($_.Exception.Message)"
+                    [System.Windows.Forms.MessageBox]::Show("Download failed.`n$($_.Exception.Message)", "Error", "OK", "Error") | Out-Null
+                    return
+                }
+
+                # 4. Execute the File Swap
+                # We spawn a hidden PowerShell process that:
+                # - Waits for this app to close (Start-Sleep)
+                # - Force-moves the temp EXE over the current one
+                # - Restarts the new EXE
+                Write-Status "Installing update..."
+                
+                $swapCommand = "Start-Sleep -s 2; Move-Item -Path '$tempExe' -Destination '$currentExe' -Force; Start-Process '$currentExe'"
+                Start-Process powershell.exe -ArgumentList "-NoProfile -WindowStyle Hidden -Command `"$swapCommand`""
+
+                # 5. Exit immediately to free up the file handle
+                $Global:mainForm.Close()
+                [System.Windows.Forms.Application]::Exit()
+                Stop-Process -Id $PID -Force
+            }
+        }
+        else {
+            Write-Status "You are on the latest version ($ScriptVersion)."
+        }
+    }
+    catch {
+        Write-Status "Update check failed: $($_.Exception.Message)"
+    }
+}
 
 function Write-Status {
     param (
@@ -164,6 +300,10 @@ function Show-CreateShortcutWindow {
     $shortcutForm.StartPosition = 'CenterParent'
     if ($Global:mainForm -and $Global:mainForm.Icon) { $shortcutForm.Icon = $Global:mainForm.Icon }
 
+    # Dark Mode/RGB Fixes
+    $shortcutForm.BackColor = $Global:mainForm.BackColor
+    $shortcutForm.ForeColor = $Global:mainForm.ForeColor
+    
     $layout = New-Object System.Windows.Forms.TableLayoutPanel
     $layout.Dock = 'Fill'
     $layout.Padding = 10
@@ -181,30 +321,45 @@ function Show-CreateShortcutWindow {
     $lblInfo = New-Object System.Windows.Forms.Label
     $lblInfo.Text = "Create shortcuts and registry keys for the Effect Installer:"
     $lblInfo.Dock = 'Fill'
+    # Dark Mode/RGB Fixes
+    $lblInfo.BackColor = [System.Drawing.Color]::Transparent
+    $lblInfo.ForeColor = [System.Drawing.Color]::White
     $layout.Controls.Add($lblInfo, 0, 0) # Row 0
 
     $chkDesktop = New-Object System.Windows.Forms.CheckBox
     $chkDesktop.Text = "On the Desktop"
     $chkDesktop.Checked = $CheckDesktop
     $chkDesktop.Dock = 'Fill'
+    # Dark Mode/RGB Fixes
+    $chkDesktop.BackColor = [System.Drawing.Color]::Transparent
+    $chkDesktop.ForeColor = [System.Drawing.Color]::White
     $layout.Controls.Add($chkDesktop, 0, 1) # Row 1
 
     $chkStartMenu = New-Object System.Windows.Forms.CheckBox
     $chkStartMenu.Text = "In the Start Menu (under 'SignalRGB Tools')"
     $chkStartMenu.Checked = $CheckStartMenu
     $chkStartMenu.Dock = 'Fill'
+    # Dark Mode/RGB Fixes
+    $chkStartMenu.BackColor = [System.Drawing.Color]::Transparent
+    $chkStartMenu.ForeColor = [System.Drawing.Color]::White
     $layout.Controls.Add($chkStartMenu, 0, 2) # Row 2
 
     $chkSendTo = New-Object System.Windows.Forms.CheckBox
     $chkSendTo.Text = "In the 'Send To' menu (for quick installs)"
     $chkSendTo.Checked = $CheckSendTo
     $chkSendTo.Dock = 'Fill'
+    # Dark Mode/RGB Fixes
+    $chkSendTo.BackColor = [System.Drawing.Color]::Transparent
+    $chkSendTo.ForeColor = [System.Drawing.Color]::White
     $layout.Controls.Add($chkSendTo, 0, 3) # Row 3
 
     $chkOpenWith = New-Object System.Windows.Forms.CheckBox
     $chkOpenWith.Text = "Add to 'Open with' context menu"
     $chkOpenWith.Checked = $CheckOpenWith
     $chkOpenWith.Dock = 'Fill'
+    # Dark Mode/RGB Fixes
+    $chkOpenWith.BackColor = [System.Drawing.Color]::Transparent
+    $chkOpenWith.ForeColor = [System.Drawing.Color]::White
     $layout.Controls.Add($chkOpenWith, 0, 4) # Row 4
 
     $btnCreate = New-Object System.Windows.Forms.Button
@@ -214,6 +369,12 @@ function Show-CreateShortcutWindow {
     $btnCreate.Anchor = 'Top'
     $btnCreate.Height = 30
     $btnCreate.Margin = [System.Windows.Forms.Padding]::new(0, 10, 0, 0)
+    # Dark Mode/RGB Fixes
+    $btnCreate.FlatStyle = [System.Windows.Forms.FlatStyle]::Flat
+    $btnCreate.ForeColor = [System.Drawing.Color]::White
+    $btnCreate.BackColor = [System.Drawing.Color]::FromArgb(60, 60, 60)
+    $btnCreate.FlatAppearance.BorderSize = 1
+    $btnCreate.FlatAppearance.BorderColor = [System.Drawing.Color]::Gray
     $layout.Controls.Add($btnCreate, 0, 5) # Row 5
 
     $btnCreate.Add_Click({
@@ -287,7 +448,7 @@ function Show-CreateShortcutWindow {
                 
                 if ($chkOpenWith.Checked) {
                     # MODIFIED: Add .json to the Open With list
-                    Set-OpenWithRegistryKeys -AppName "SignalRGB Installer" -AppPath $Global:ScriptFullPath -FileExtensions @(".zip", ".html", ".json")
+                    Set-OpenWithRegistryKeys -AppName "SRGB Installer" -AppPath $Global:ScriptFullPath -FileExtensions @(".zip", ".html", ".json")
                 }
             
                 # Dialog will close cleanly because DialogResult is set on the button
@@ -322,6 +483,10 @@ function Show-UninstallWindow {
     $uninstallForm.StartPosition = 'CenterParent'
     if ($Global:mainForm -and $Global:mainForm.Icon) { $uninstallForm.Icon = $Global:mainForm.Icon }
 
+    # Dark Mode/RGB Fixes
+    $uninstallForm.BackColor = $Global:mainForm.BackColor
+    $uninstallForm.ForeColor = $Global:mainForm.ForeColor
+
     $layout = New-Object System.Windows.Forms.TableLayoutPanel
     $layout.Dock = 'Fill'
     $layout.Padding = 10
@@ -346,12 +511,21 @@ function Show-UninstallWindow {
     $lblInfo.Text = "Select items to delete (moves to Recycle Bin):" # MODIFIED
     $lblInfo.Dock = 'Fill'
     $lblInfo.TextAlign = 'MiddleLeft'
+    # Dark Mode/RGB Fixes
+    $lblInfo.BackColor = [System.Drawing.Color]::Transparent
+    $lblInfo.ForeColor = [System.Drawing.Color]::White
     $headerPanel.Controls.Add($lblInfo, 0, 0)
 
     $btnRefresh = New-Object System.Windows.Forms.Button
     $btnRefresh.Text = "Refresh List"
     $btnRefresh.Dock = 'None'
     $btnRefresh.Anchor = 'Right'
+    # Dark Mode/RGB Fixes
+    $btnRefresh.FlatStyle = [System.Windows.Forms.FlatStyle]::Flat
+    $btnRefresh.ForeColor = [System.Drawing.Color]::White
+    $btnRefresh.BackColor = [System.Drawing.Color]::FromArgb(60, 60, 60)
+    $btnRefresh.FlatAppearance.BorderSize = 1
+    $btnRefresh.FlatAppearance.BorderColor = [System.Drawing.Color]::Gray
     $headerPanel.Controls.Add($btnRefresh, 1, 0)
 
     # --- SCRIPT CHANGE: Create a 2-column layout for the lists ---
@@ -377,12 +551,18 @@ function Show-UninstallWindow {
     $lblEffects.Text = "Effects:"
     $lblEffects.Font = New-Object System.Drawing.Font($lblInfo.Font, [System.Drawing.FontStyle]::Bold)
     $lblEffects.Dock = 'Fill'
+    # Dark Mode/RGB Fixes
+    $lblEffects.BackColor = [System.Drawing.Color]::Transparent
+    $lblEffects.ForeColor = [System.Drawing.Color]::White
     $effectsLayout.Controls.Add($lblEffects, 0, 0)
 
     $clbEffects = New-Object System.Windows.Forms.CheckedListBox
     $clbEffects.Dock = 'Fill'
     $clbEffects.CheckOnClick = $true
     $clbEffects.Margin = [System.Windows.Forms.Padding]::new(0, 3, 5, 0) # Add margin to the right
+    # Dark Mode/RGB Fixes
+    $clbEffects.BackColor = [System.Drawing.Color]::FromArgb(40, 40, 40)
+    $clbEffects.ForeColor = [System.Drawing.Color]::White
     $effectsLayout.Controls.Add($clbEffects, 0, 1)
 
     # --- Column 1: Components List ---
@@ -398,6 +578,9 @@ function Show-UninstallWindow {
     $lblComponents.Text = "Components:"
     $lblComponents.Font = New-Object System.Drawing.Font($lblInfo.Font, [System.Drawing.FontStyle]::Bold)
     $lblComponents.Dock = 'Fill'
+    # Dark Mode/RGB Fixes
+    $lblComponents.BackColor = [System.Drawing.Color]::Transparent
+    $lblComponents.ForeColor = [System.Drawing.Color]::White
     $componentsLayout.Controls.Add($lblComponents, 0, 0)
 
     $clbComponents = New-Object System.Windows.Forms.CheckedListBox
@@ -407,6 +590,9 @@ function Show-UninstallWindow {
     
     # --- MODIFICATION: Tell the listbox which property to display ---
     $clbComponents.DisplayMember = "DisplayName"
+    # Dark Mode/RGB Fixes
+    $clbComponents.BackColor = [System.Drawing.Color]::FromArgb(40, 40, 40)
+    $clbComponents.ForeColor = [System.Drawing.Color]::White
     
     $componentsLayout.Controls.Add($clbComponents, 0, 1)
     # --- End of layout change ---
@@ -416,6 +602,12 @@ function Show-UninstallWindow {
     $btnDelete.Text = "Delete Selected"
     $btnDelete.Dock = 'Fill'
     $btnDelete.Height = 30
+    # Dark Mode/RGB Fixes
+    $btnDelete.FlatStyle = [System.Windows.Forms.FlatStyle]::Flat
+    $btnDelete.ForeColor = [System.Drawing.Color]::White
+    $btnDelete.BackColor = [System.Drawing.Color]::FromArgb(60, 60, 60)
+    $btnDelete.FlatAppearance.BorderSize = 1
+    $btnDelete.FlatAppearance.BorderColor = [System.Drawing.Color]::Gray
     $layout.Controls.Add($btnDelete, 0, 2)
 
     # --- Functions for this window ---
@@ -642,6 +834,9 @@ function Show-UninstallWindow {
 
     # --- Initial Load ---
     $populateList.Invoke()
+    $uninstallForm.Add_Shown({
+            Set-WindowDarkMode -Form $this
+        })
     $uninstallForm.ShowDialog($Global:mainForm) | Out-Null
     $uninstallForm.Dispose()
 }
@@ -778,6 +973,10 @@ function Show-ConflictDialog {
     $dialog.StartPosition = 'CenterParent'
     if ($Global:mainForm -and $Global:mainForm.Icon) { $dialog.Icon = $Global:mainForm.Icon }
     
+    # Dark Mode/RGB Fixes
+    $dialog.BackColor = $Global:mainForm.BackColor
+    $dialog.ForeColor = $Global:mainForm.ForeColor
+
     $mainLayout = New-Object System.Windows.Forms.TableLayoutPanel
     $mainLayout.Dock = 'Fill'
     $mainLayout.Padding = 10
@@ -793,6 +992,8 @@ function Show-ConflictDialog {
     
     # --- MODIFICATION ---
     $lblMessage.TextAlign = 'MiddleLeft' # Was 'MiddleCenter'
+    $lblMessage.BackColor = [System.Drawing.Color]::Transparent
+    $lblMessage.ForeColor = [System.Drawing.Color]::White
     
     $mainLayout.Controls.Add($lblMessage, 0, 0)
 
@@ -812,6 +1013,12 @@ function Show-ConflictDialog {
     $btnOverwrite.Dock = 'None'
     $btnOverwrite.Anchor = 'Top, Left, Right'
     $btnOverwrite.Height = 30
+    # Dark Mode/RGB Fixes
+    $btnOverwrite.FlatStyle = [System.Windows.Forms.FlatStyle]::Flat
+    $btnOverwrite.ForeColor = [System.Drawing.Color]::White
+    $btnOverwrite.BackColor = [System.Drawing.Color]::FromArgb(60, 60, 60)
+    $btnOverwrite.FlatAppearance.BorderSize = 1
+    $btnOverwrite.FlatAppearance.BorderColor = [System.Drawing.Color]::Gray
     $buttonLayout.Controls.Add($btnOverwrite, 0, 0)
     
     $btnRename = New-Object System.Windows.Forms.Button
@@ -820,6 +1027,12 @@ function Show-ConflictDialog {
     $btnRename.Dock = 'None'
     $btnRename.Anchor = 'Top, Left, Right'
     $btnRename.Height = 30
+    # Dark Mode/RGB Fixes
+    $btnRename.FlatStyle = [System.Windows.Forms.FlatStyle]::Flat
+    $btnRename.ForeColor = [System.Drawing.Color]::White
+    $btnRename.BackColor = [System.Drawing.Color]::FromArgb(60, 60, 60)
+    $btnRename.FlatAppearance.BorderSize = 1
+    $btnRename.FlatAppearance.BorderColor = [System.Drawing.Color]::Gray
     $buttonLayout.Controls.Add($btnRename, 1, 0)
 
     $btnCancel = New-Object System.Windows.Forms.Button
@@ -828,6 +1041,12 @@ function Show-ConflictDialog {
     $btnCancel.Dock = 'None'
     $btnCancel.Anchor = 'Top, Left, Right'
     $btnCancel.Height = 30
+    # Dark Mode/RGB Fixes
+    $btnCancel.FlatStyle = [System.Windows.Forms.FlatStyle]::Flat
+    $btnCancel.ForeColor = [System.Drawing.Color]::White
+    $btnCancel.BackColor = [System.Drawing.Color]::FromArgb(60, 60, 60)
+    $btnCancel.FlatAppearance.BorderSize = 1
+    $btnCancel.FlatAppearance.BorderColor = [System.Drawing.Color]::Gray
     $buttonLayout.Controls.Add($btnCancel, 2, 0)
 
     $result = $dialog.ShowDialog($Global:mainForm)
@@ -853,28 +1072,52 @@ function Show-RenameDialog {
     $dialog.StartPosition = 'CenterParent'
     if ($Global:mainForm -and $Global:mainForm.Icon) { $dialog.Icon = $Global:mainForm.Icon }
 
+    # Dark Mode/RGB Fixes
+    $dialog.BackColor = $Global:mainForm.BackColor
+    $dialog.ForeColor = $Global:mainForm.ForeColor
+
     $lblInfo = New-Object System.Windows.Forms.Label
     $lblInfo.Text = "Enter a new name for the item:"
     $lblInfo.Location = New-Object System.Drawing.Point(20, 20)
     $lblInfo.AutoSize = $true
+    # Dark Mode/RGB Fixes
+    $lblInfo.BackColor = [System.Drawing.Color]::Transparent
+    $lblInfo.ForeColor = [System.Drawing.Color]::White
     $dialog.Controls.Add($lblInfo)
     
     $txtNewName = New-Object System.Windows.Forms.TextBox
     $txtNewName.Text = $OldName
     $txtNewName.Location = New-Object System.Drawing.Point(20, 50)
     $txtNewName.Size = New-Object System.Drawing.Size(300, 20)
+    # --- DARK MODE FIX ---
+    $txtNewName.BackColor = [System.Drawing.Color]::FromArgb(40, 40, 40)
+    $txtNewName.ForeColor = [System.Drawing.Color]::White
+    $txtNewName.BorderStyle = 'FixedSingle'
+    # ---------------------
     $dialog.Controls.Add($txtNewName)
-    
+        
     $btnOK = New-Object System.Windows.Forms.Button
     $btnOK.Text = "OK"
     $btnOK.DialogResult = 'OK'
     $btnOK.Location = New-Object System.Drawing.Point(160, 90)
+    # Dark Mode/RGB Fixes
+    $btnOK.FlatStyle = [System.Windows.Forms.FlatStyle]::Flat
+    $btnOK.ForeColor = [System.Drawing.Color]::White
+    $btnOK.BackColor = [System.Drawing.Color]::FromArgb(60, 60, 60)
+    $btnOK.FlatAppearance.BorderSize = 1
+    $btnOK.FlatAppearance.BorderColor = [System.Drawing.Color]::Gray
     $dialog.Controls.Add($btnOK)
     
     $btnCancel = New-Object System.Windows.Forms.Button
     $btnCancel.Text = "Cancel"
     $btnCancel.DialogResult = 'Cancel'
     $btnCancel.Location = New-Object System.Drawing.Point(240, 90)
+    # Dark Mode/RGB Fixes
+    $btnCancel.FlatStyle = [System.Windows.Forms.FlatStyle]::Flat
+    $btnCancel.ForeColor = [System.Drawing.Color]::White
+    $btnCancel.BackColor = [System.Drawing.Color]::FromArgb(60, 60, 60)
+    $btnCancel.FlatAppearance.BorderSize = 1
+    $btnCancel.FlatAppearance.BorderColor = [System.Drawing.Color]::Gray
     $dialog.Controls.Add($btnCancel)
     
     $dialog.AcceptButton = $btnOK
@@ -1026,7 +1269,7 @@ function Show-DisclaimerWindow {
     
     # Define the disclaimer text
     $disclaimerText = @"
-SignalRGB Effect Installer - Terms of Use
+SRGB Effect Installer - Terms of Use
 
 1. No Warranty
 This Tool is provided "as-is", without any warranties of any kind, express or implied. The developer makes no guarantees regarding its functionality, reliability, or suitability for any particular purpose.
@@ -1057,6 +1300,10 @@ https://github.com/joseamirandavelez/SignalRGB-Effect-Installer
     $disclaimerForm.StartPosition = 'CenterParent'
     if ($Global:mainForm -and $Global:mainForm.Icon) { $disclaimerForm.Icon = $Global:mainForm.Icon }
 
+    # Dark Mode/RGB Fixes
+    $disclaimerForm.BackColor = $Global:mainForm.BackColor
+    $disclaimerForm.ForeColor = $Global:mainForm.ForeColor
+
     $layout = New-Object System.Windows.Forms.TableLayoutPanel
     $layout.Dock = 'Fill'
     $layout.Padding = 10
@@ -1072,6 +1319,10 @@ https://github.com/joseamirandavelez/SignalRGB-Effect-Installer
     $rtbDisclaimer.DetectUrls = $true
     $rtbDisclaimer.Text = $disclaimerText
     $rtbDisclaimer.Margin = [System.Windows.Forms.Padding]::new(0, 0, 0, 10)
+    # Dark Mode/RGB Fixes
+    $rtbDisclaimer.BackColor = [System.Drawing.Color]::FromArgb(40, 40, 40)
+    $rtbDisclaimer.ForeColor = [System.Drawing.Color]::White
+    $rtbDisclaimer.BorderStyle = 'FixedSingle'
     $layout.Controls.Add($rtbDisclaimer, 0, 0)
 
     $btnOK = New-Object System.Windows.Forms.Button
@@ -1081,6 +1332,12 @@ https://github.com/joseamirandavelez/SignalRGB-Effect-Installer
     $btnOK.Anchor = 'Right'
     $btnOK.Height = 30
     $btnOK.Width = 80
+    # Dark Mode/RGB Fixes
+    $btnOK.FlatStyle = [System.Windows.Forms.FlatStyle]::Flat
+    $btnOK.ForeColor = [System.Drawing.Color]::White
+    $btnOK.BackColor = [System.Drawing.Color]::FromArgb(60, 60, 60)
+    $btnOK.FlatAppearance.BorderSize = 1
+    $btnOK.FlatAppearance.BorderColor = [System.Drawing.Color]::Gray
     $layout.Controls.Add($btnOK, 0, 1)
 
     $rtbDisclaimer.Add_LinkClicked({
@@ -1095,6 +1352,9 @@ https://github.com/joseamirandavelez/SignalRGB-Effect-Installer
         })
 
     $disclaimerForm.AcceptButton = $btnOK
+    $disclaimerForm.Add_Shown({
+            Set-WindowDarkMode -Form $this
+        })
     $disclaimerForm.ShowDialog($Global:mainForm) | Out-Null
     $disclaimerForm.Dispose()
 }
@@ -1279,7 +1539,8 @@ function Start-Installation {
                 # --- END MODIFIED LOGIC ---
             }
             
-            if ($fileNameConflict -or $titleConflictFile -or $productNameConflictFile) { # MODIFIED to include product name
+            if ($fileNameConflict -or $titleConflictFile -or $productNameConflictFile) {
+                # MODIFIED to include product name
                 # Conflict found!
                 $conflictMessage += "`nWould you like to Overwrite, Rename, or Cancel?"
                 
@@ -1478,15 +1739,15 @@ if ($args.Count -gt 0) {
     # Final Restart Prompt (if at least one installed file required it)
     if ($batchRestartRequired) {
         $restartResult = [System.Windows.Forms.MessageBox]::Show("Batch installation complete.`n`n$AppName must be restarted to load the new item(s). Restart now?", "Restart Required", "YesNo", "Question")
-        
+    
         if ($restartResult -eq 'Yes') {
             Write-Host "User chose to restart."
             try {
-                Stop-Process -Name $AppName -Force -ErrorAction Stop
-                Write-Host "$AppName process stopped. It should restart automatically."
+                Start-Process "signalrgb://app/restart" -ErrorAction Stop
+                Write-Host "Restart signal sent to $AppName."
             }
             catch {
-                [System.Windows.Forms.MessageBox]::Show("Could not stop $AppName. Please restart it manually.", "Restart Failed", "OK", "Warning") | Out-Null
+                [System.Windows.Forms.MessageBox]::Show("Could not trigger the restart via URI. Please restart $AppName manually.", "Restart Failed", "OK", "Warning") | Out-Null
             }
         }
     }
@@ -1506,24 +1767,34 @@ if ($args.Count -gt 0) {
 
 # --- Main Form ---
 $Global:mainForm = New-Object System.Windows.Forms.Form
-$Global:mainForm.Text = "SignalRGB Effect & Component Installer"
+$Global:mainForm.Text = "SRGB Effect & Component Installer - v$ScriptVersion"
 $Global:mainForm.Size = New-Object System.Drawing.Size(650, 500) 
 $Global:mainForm.FormBorderStyle = 'FixedSingle'
 $Global:mainForm.MaximizeBox = $false
 $Global:mainForm.StartPosition = 'CenterScreen'
 $Global:mainForm.ShowInTaskbar = $true
 
+# --- DARK MODE/RGB FIXES ---
+$Global:mainForm.BackColor = [System.Drawing.Color]::FromArgb(30, 30, 30) # Default Dark Grey
+$Global:mainForm.ForeColor = [System.Drawing.Color]::White # White Text
+# --- END DARK MODE/RGB FIXES ---
+
 # --- Main Layout Table ---
 $mainLayout = New-Object System.Windows.Forms.TableLayoutPanel
 $mainLayout.Dock = 'Fill'
 $mainLayout.Padding = 10
 $mainLayout.ColumnCount = 1
-$mainLayout.RowCount = 4 # Row for Logo, Row for File Input, Row for Buttons, Row for Status Box
-$mainLayout.RowStyles.Add((New-Object System.Windows.Forms.RowStyle([System.Windows.Forms.SizeType]::AutoSize))) | Out-Null # Logo
-$mainLayout.RowStyles.Add((New-Object System.Windows.Forms.RowStyle([System.Windows.Forms.SizeType]::AutoSize))) | Out-Null # File Input
-$mainLayout.RowStyles.Add((New-Object System.Windows.Forms.RowStyle([System.Windows.Forms.SizeType]::AutoSize))) | Out-Null # Buttons
-$mainLayout.RowStyles.Add((New-Object System.Windows.Forms.RowStyle([System.Windows.Forms.SizeType]::Percent, 100))) | Out-Null # Status Box
-$Global:mainForm.Controls.Add($mainLayout)
+$mainLayout.RowCount = 4 
+$mainLayout.RowStyles.Add((New-Object System.Windows.Forms.RowStyle([System.Windows.Forms.SizeType]::AutoSize))) | Out-Null 
+$mainLayout.RowStyles.Add((New-Object System.Windows.Forms.RowStyle([System.Windows.Forms.SizeType]::AutoSize))) | Out-Null 
+$mainLayout.RowStyles.Add((New-Object System.Windows.Forms.RowStyle([System.Windows.Forms.SizeType]::AutoSize))) | Out-Null 
+$mainLayout.RowStyles.Add((New-Object System.Windows.Forms.RowStyle([System.Windows.Forms.SizeType]::Percent, 100))) | Out-Null 
+
+# FIX 1: Set Transparency so the RGB animation shows through
+$mainLayout.BackColor = [System.Drawing.Color]::Transparent 
+
+# FIX 2: Add the layout to the FORM, not to itself
+$Global:mainForm.Controls.Add($mainLayout) 
 
 # --- Row 0: Logo ---
 $picLogo = New-Object System.Windows.Forms.PictureBox
@@ -1532,6 +1803,7 @@ $picLogo.Size = New-Object System.Drawing.Size(128, 128)
 $picLogo.Dock = 'None'
 $picLogo.Anchor = 'Top'
 $picLogo.Margin = [System.Windows.Forms.Padding]::new(0, 0, 0, 10)
+$picLogo.BackColor = [System.Drawing.Color]::Transparent
 
 $localIconPath = Join-Path -Path $Global:ScriptDirectory -ChildPath "icon.ico"
 $localLogoPath = Join-Path -Path $Global:ScriptDirectory -ChildPath "logo.png"
@@ -1551,9 +1823,6 @@ if (Test-Path -Path $localLogoPath) {
         Write-Status "ERROR: Could not load logo.png: $($_.Exception.Message)"
     }
 }
-else {
-    Write-Status "No logo.png found. Hiding logo area."
-}
 
 # --- Row 1: File Input ---
 $fileInputLayout = New-Object System.Windows.Forms.TableLayoutPanel
@@ -1564,18 +1833,31 @@ $fileInputLayout.RowCount = 4
 $fileInputLayout.ColumnStyles.Add((New-Object System.Windows.Forms.ColumnStyle([System.Windows.Forms.SizeType]::AutoSize))) | Out-Null
 $fileInputLayout.ColumnStyles.Add((New-Object System.Windows.Forms.ColumnStyle([System.Windows.Forms.SizeType]::Percent, 100))) | Out-Null
 $fileInputLayout.ColumnStyles.Add((New-Object System.Windows.Forms.ColumnStyle([System.Windows.Forms.SizeType]::Absolute, 95))) | Out-Null
+
+# FIX 3: Transparency for the input area
+$fileInputLayout.BackColor = [System.Drawing.Color]::Transparent
 $mainLayout.Controls.Add($fileInputLayout, 0, 1)
 
+# --- ENABLE DROP ZONE ---
+$fileInputLayout.AllowDrop = $true
+
 $lblFile = New-Object System.Windows.Forms.Label
-$lblFile.Text = "Install File(s):" # MODIFIED
+$lblFile.Text = "Install File(s):" 
 $lblFile.Dock = 'Fill'
 $lblFile.TextAlign = 'MiddleLeft'
 $lblFile.Margin = [System.Windows.Forms.Padding]::new(0, 0, 5, 0)
+$lblFile.BackColor = [System.Drawing.Color]::Transparent
+$lblFile.ForeColor = [System.Drawing.Color]::White
 $fileInputLayout.Controls.Add($lblFile, 0, 0)
 
 $txtFilePath = New-Object System.Windows.Forms.TextBox
 $txtFilePath.Dock = 'Fill'
 $txtFilePath.AllowDrop = $true
+# --- DARK MODE FIX ---
+$txtFilePath.BackColor = [System.Drawing.Color]::FromArgb(40, 40, 40)
+$txtFilePath.ForeColor = [System.Drawing.Color]::White
+$txtFilePath.BorderStyle = 'FixedSingle' # Makes it look flatter/modern
+# ---------------------
 $fileInputLayout.Controls.Add($txtFilePath, 1, 0)
 
 $btnBrowse = New-Object System.Windows.Forms.Button
@@ -1584,77 +1866,75 @@ $btnBrowse.Dock = 'None'
 $btnBrowse.AutoSize = $true 
 $btnBrowse.Anchor = 'Top, Left'
 $btnBrowse.Margin = [System.Windows.Forms.Padding]::new(5, 0, 0, 0)
+$btnBrowse.FlatStyle = [System.Windows.Forms.FlatStyle]::Flat
+$btnBrowse.ForeColor = [System.Drawing.Color]::White
+$btnBrowse.BackColor = [System.Drawing.Color]::FromArgb(60, 60, 60)
+$btnBrowse.FlatAppearance.BorderSize = 1
+$btnBrowse.FlatAppearance.BorderColor = [System.Drawing.Color]::Gray
 $fileInputLayout.Controls.Add($btnBrowse, 2, 0)
 
 $lblHint = New-Object System.Windows.Forms.Label
-$lblHint.Text = "Drag-and-drop a .zip, .html, or .json file here, or click Browse." # MODIFIED
+$lblHint.Text = "Drag-and-drop a .zip, .html, or .json file here, or click Browse." 
 $lblHint.Font = New-Object System.Drawing.Font("Segoe UI", 9, [System.Drawing.FontStyle]::Italic)
 $lblHint.Dock = 'Fill'
 $lblHint.Margin = [System.Windows.Forms.Padding]::new(0, 0, 0, 5)
-$fileInputLayout.Controls.Add($lblHint, 1, 1) # Span 2
+$lblHint.BackColor = [System.Drawing.Color]::Transparent
+$lblHint.ForeColor = [System.Drawing.Color]::White
+$fileInputLayout.Controls.Add($lblHint, 1, 1) 
 $fileInputLayout.SetColumnSpan($lblHint, 2)
 
-# --- Add LinkLabel for Effect Builder ---
+# --- Add LinkLabels (Builder) ---
 $lnkBuilder = New-Object System.Windows.Forms.LinkLabel
 $lnkBuilder.Text = "Create your own effects with the Effect Builder"
-# Link starts at char 32 ("Effect Builder"), length 14
 $lnkBuilder.Links.Add(32, 14, "https://effectbuilder.github.io/") | Out-Null 
 $lnkBuilder.Dock = 'Fill'
 $lnkBuilder.TextAlign = 'MiddleLeft'
 $lnkBuilder.Margin = [System.Windows.Forms.Padding]::new(0, 0, 0, 5)
-$fileInputLayout.Controls.Add($lnkBuilder, 1, 2) # Add to new row 2
+$lnkBuilder.BackColor = [System.Drawing.Color]::Transparent
+# Fix Link Color for Dark Mode
+$lnkBuilder.LinkColor = [System.Drawing.Color]::Cyan 
+$fileInputLayout.Controls.Add($lnkBuilder, 1, 2)
 $fileInputLayout.SetColumnSpan($lnkBuilder, 2)
 
 $lnkBuilder.Add_LinkClicked({
-        param($s, $e) # FIX: Renamed $sender to $s
-        try {
-            [System.Diagnostics.Process]::Start($e.Link.LinkData)
-            $e.Link.Visited = $true
-        }
-        catch {
-            Write-Status "ERROR: Could not open URL: $($e.Link.LinkData)"
-        }
+        param($s, $e)
+        try { [System.Diagnostics.Process]::Start($e.Link.LinkData); $e.Link.Visited = $true } catch {}
     })
 
-# --- NEW: Add LinkLabel for Component Builder ---
 $lnkComponentBuilder = New-Object System.Windows.Forms.LinkLabel
 $lnkComponentBuilder.Text = "Create your own components with the Component Builder"
-# Link starts at char 35 ("Component Builder"), length 17
 $lnkComponentBuilder.Links.Add(35, 17, "https://effectbuilder.github.io/builder/") | Out-Null 
 $lnkComponentBuilder.Dock = 'Fill'
 $lnkComponentBuilder.TextAlign = 'MiddleLeft'
 $lnkComponentBuilder.Margin = [System.Windows.Forms.Padding]::new(0, 0, 0, 5)
-$fileInputLayout.Controls.Add($lnkComponentBuilder, 1, 3) # Add to new row 3
+$lnkComponentBuilder.BackColor = [System.Drawing.Color]::Transparent
+# Fix Link Color for Dark Mode
+$lnkComponentBuilder.LinkColor = [System.Drawing.Color]::Cyan
+$fileInputLayout.Controls.Add($lnkComponentBuilder, 1, 3) 
 $fileInputLayout.SetColumnSpan($lnkComponentBuilder, 2)
 
 $lnkComponentBuilder.Add_LinkClicked({
         param($s, $e)
-        try {
-            [System.Diagnostics.Process]::Start($e.Link.LinkData)
-            $e.Link.Visited = $true
-        }
-        catch {
-            Write-Status "ERROR: Could not open URL: $($e.Link.LinkData)"
-        }
+        try { [System.Diagnostics.Process]::Start($e.Link.LinkData); $e.Link.Visited = $true } catch {}
     })
-# --- End of NEW LinkLabel ---
-# --- End of LinkLabel ---
-
 
 # --- Row 2: Buttons ---
 $buttonLayout = New-Object System.Windows.Forms.TableLayoutPanel
 $buttonLayout.Dock = 'Fill'
 $buttonLayout.AutoSize = $true
-$buttonLayout.ColumnCount = 4 # --- SCRIPT FIX: Increased to 4 ---
+$buttonLayout.ColumnCount = 4 
 $buttonLayout.RowCount = 1
 $buttonLayout.RowStyles.Add((New-Object System.Windows.Forms.RowStyle([System.Windows.Forms.SizeType]::AutoSize))) | Out-Null
-# --- SCRIPT FIX: Set to 4 columns at 25% ---
 $buttonLayout.ColumnStyles.Clear()
 $buttonLayout.ColumnStyles.Add((New-Object System.Windows.Forms.ColumnStyle([System.Windows.Forms.SizeType]::Percent, 25))) | Out-Null
 $buttonLayout.ColumnStyles.Add((New-Object System.Windows.Forms.ColumnStyle([System.Windows.Forms.SizeType]::Percent, 25))) | Out-Null
 $buttonLayout.ColumnStyles.Add((New-Object System.Windows.Forms.ColumnStyle([System.Windows.Forms.SizeType]::Percent, 25))) | Out-Null
 $buttonLayout.ColumnStyles.Add((New-Object System.Windows.Forms.ColumnStyle([System.Windows.Forms.SizeType]::Percent, 25))) | Out-Null
 $buttonLayout.Margin = [System.Windows.Forms.Padding]::new(0, 5, 0, 10)
+
+# FIX 4: Transparency for the button container
+$buttonLayout.BackColor = [System.Drawing.Color]::Transparent
+
 $mainLayout.Controls.Add($buttonLayout, 0, 2)
 
 $btnInstall = New-Object System.Windows.Forms.Button
@@ -1662,6 +1942,12 @@ $btnInstall.Text = "Install Item(s)" # MODIFIED
 $btnInstall.Dock = 'None' 
 $btnInstall.Anchor = 'Top, Left, Right' 
 $btnInstall.Height = 30 
+# Dark Mode/RGB Fixes
+$btnInstall.FlatStyle = [System.Windows.Forms.FlatStyle]::Flat
+$btnInstall.ForeColor = [System.Drawing.Color]::White
+$btnInstall.BackColor = [System.Drawing.Color]::FromArgb(60, 60, 60)
+$btnInstall.FlatAppearance.BorderSize = 1
+$btnInstall.FlatAppearance.BorderColor = [System.Drawing.Color]::Gray
 $buttonLayout.Controls.Add($btnInstall, 0, 0)
 
 $btnUninstall = New-Object System.Windows.Forms.Button
@@ -1669,6 +1955,12 @@ $btnUninstall.Text = "Uninstall an Item..." # MODIFIED
 $btnUninstall.Dock = 'None' 
 $btnUninstall.Anchor = 'Top, Left, Right' 
 $btnUninstall.Height = 30 
+# Dark Mode/RGB Fixes
+$btnUninstall.FlatStyle = [System.Windows.Forms.FlatStyle]::Flat
+$btnUninstall.ForeColor = [System.Drawing.Color]::White
+$btnUninstall.BackColor = [System.Drawing.Color]::FromArgb(60, 60, 60)
+$btnUninstall.FlatAppearance.BorderSize = 1
+$btnUninstall.FlatAppearance.BorderColor = [System.Drawing.Color]::Gray
 $buttonLayout.Controls.Add($btnUninstall, 1, 0)
 
 # --- Disclaimer Button ---
@@ -1677,6 +1969,12 @@ $btnDisclaimer.Text = "Disclaimer..."
 $btnDisclaimer.Dock = 'None'
 $btnDisclaimer.Anchor = 'Top, Left, Right'
 $btnDisclaimer.Height = 30
+# Dark Mode/RGB Fixes
+$btnDisclaimer.FlatStyle = [System.Windows.Forms.FlatStyle]::Flat
+$btnDisclaimer.ForeColor = [System.Drawing.Color]::White
+$btnDisclaimer.BackColor = [System.Drawing.Color]::FromArgb(60, 60, 60)
+$btnDisclaimer.FlatAppearance.BorderSize = 1
+$btnDisclaimer.FlatAppearance.BorderColor = [System.Drawing.Color]::Gray
 $buttonLayout.Controls.Add($btnDisclaimer, 2, 0)
 
 # --- NEW: Open Folder Button ---
@@ -1685,6 +1983,12 @@ $btnOpenFolder.Text = "Open WhirlwindFX Folder"
 $btnOpenFolder.Dock = 'None'
 $btnOpenFolder.Anchor = 'Top, Left, Right'
 $btnOpenFolder.Height = 30
+# Dark Mode/RGB Fixes
+$btnOpenFolder.FlatStyle = [System.Windows.Forms.FlatStyle]::Flat
+$btnOpenFolder.ForeColor = [System.Drawing.Color]::White
+$btnOpenFolder.BackColor = [System.Drawing.Color]::FromArgb(60, 60, 60)
+$btnOpenFolder.FlatAppearance.BorderSize = 1
+$btnOpenFolder.FlatAppearance.BorderColor = [System.Drawing.Color]::Gray
 $buttonLayout.Controls.Add($btnOpenFolder, 3, 0)
 
 # --- Row 3: Status Box ---
@@ -1694,15 +1998,26 @@ $script:txtStatus.ReadOnly = $true
 $script:txtStatus.ScrollBars = 'Vertical'
 $script:txtStatus.Dock = 'Fill'
 $script:txtStatus.Font = New-Object System.Drawing.Font("Consolas", 9)
+# Dark Mode/RGB Fixes
+# Set to pure black to contrast with the colorful animated background
+$script:txtStatus.BackColor = [System.Drawing.Color]::Black 
+# Brighter, crisper green
+$script:txtStatus.ForeColor = [System.Drawing.Color]::FromArgb(50, 255, 50) 
+$script:txtStatus.BorderStyle = 'Fixed3D' # Adds a bit of depth
+$script:txtStatus.BorderStyle = 'FixedSingle'
 $mainLayout.Controls.Add($script:txtStatus, 0, 3)
 
 # --- Form and Control Event Handlers ---
 
 $Global:mainForm.Add_Shown({
+        # --- ENABLE DARK TITLE BAR ---
+        Set-WindowDarkMode -Form $Global:mainForm
+
         # Logging will work here as the form is visible and the handle is created
+        Write-Status "Application started (v$ScriptVersion)."
         Write-Status "Application started."
         Write-Status "Looking for resources in: $Global:ScriptDirectory"
-    
+
         # Set Window Icon
         if (Test-Path -Path $localIconPath) {
             try {
@@ -1719,7 +2034,7 @@ $Global:mainForm.Add_Shown({
         else {
             Write-Status "No icon.ico found. Using default icon."
         }
-    
+
         # Set logo status
         if ($logoLoaded) {
             Write-Status "Logo loaded successfully from local file."
@@ -1727,24 +2042,24 @@ $Global:mainForm.Add_Shown({
 
         # --- Check for missing items (Robust Logic) ---
         Write-Status "--- Checking for Installer Shortcuts and Registry Keys ---"
-        
+    
         # Check Shortcut Files
         $desktopExists = (Test-Path -Path $Global:DesktopShortcutPath -PathType Leaf)
         $startMenuExists = (Test-Path -Path $Global:StartMenuShortcutPath -PathType Leaf)
         $sendToExists = (Test-Path -Path $Global:SendToShortcutPath -PathType Leaf)
-        
+    
         # Check Registry Key (Open With)
         $openWithKeyPath = "HKCU:\Software\Microsoft\Windows\CurrentVersion\App Paths\SignalRGB Installer.exe"
         $openWithExists = Test-Path -Path $openWithKeyPath
 
         $isAnyMissing = (-not $desktopExists -or -not $startMenuExists -or -not $sendToExists -or -not $openWithExists)
-        
+    
         Write-Status "Desktop: $desktopExists, Start Menu: $startMenuExists, Send To: $sendToExists, Open With Reg: $openWithExists"
 
         if ($isAnyMissing) {
             Write-Status "One or more desired setup items are missing. Prompting user."
             $promptResult = [System.Windows.Forms.MessageBox]::Show("Would you like to create shortcuts on your Desktop, Start Menu, 'Send To' menu, and/or 'Open with' context menu?", "Create Shortcut/Registry?", "YesNo", "Question")
-        
+    
             if ($promptResult -eq 'Yes') {
                 # Pre-check the boxes for the missing ones only
                 Show-CreateShortcutWindow -ScriptDirectory $Global:ScriptDirectory -IconPath $localIconPath -CheckDesktop (-not $desktopExists) -CheckStartMenu (-not $startMenuExists) -CheckSendTo (-not $sendToExists) -CheckOpenWith (-not $openWithExists)
@@ -1764,59 +2079,119 @@ $Global:mainForm.Add_Shown({
         catch {
             Write-Status "ERROR: Could not read SignalRGB registry key on startup."
         }
+
+        # --- NEW: RGB ANIMATION TIMER ---
+        $rgbTimer = New-Object System.Windows.Forms.Timer
+        $rgbTimer.Interval = 100 # Update every 100ms
+        $rgbTimer.Add_Tick({
+                # Increment Hue (0 to 360)
+                $script:hue += 1
+                if ($script:hue -ge 360) { $script:hue = 0 }
+        
+                # Calculate new dark color
+                $newColor = Get-RGBColor -Hue $script:hue
+        
+                # Apply to Form
+                $Global:mainForm.BackColor = $newColor
+            })
+        $rgbTimer.Start()
+        # --- END NEW RGB ANIMATION TIMER ---
+    
+        # Run update check slightly delayed to allow UI to render first
+        $timer = New-Object System.Windows.Forms.Timer
+        $timer.Interval = 1000 # 1 seconds
+        $timer.Add_Tick({
+                $this.Stop() 
+                Check-ForUpdates
+            })
+        $timer.Start()
     })
 
-# Drag and Drop Event
-$txtFilePath.Add_DragEnter({
-        param($s, $e) # FIX: Renamed $sender to $s
-        if ($e.Data.GetDataPresent([System.Windows.Forms.DataFormats]::FileDrop)) {
-            $files = $e.Data.GetData([System.Windows.Forms.DataFormats]::FileDrop)
-        
-            # MODIFIED: Check for .json as well
-            $hasValidFile = $files | Where-Object { 
-                $ext = [System.IO.Path]::GetExtension($_).ToLower()
-                $ext -in @(".zip", ".html", ".json")
-            }
-        
-            if ($hasValidFile) {
-                $e.Effect = [System.Windows.Forms.DragDropEffects]::Copy
-            }
-        }
-    })
+# --- Enhanced Drag and Drop Logic (Visual Drop Zone) ---
 
-$txtFilePath.Add_DragDrop({
-        param($s, $e) # FIX: Renamed $sender to $s
+# 0. Enable Drop on the larger layout container
+$fileInputLayout.AllowDrop = $true
+
+# 1. Define the "Drag Enter" Visuals (Green Glow + Text Change)
+$onDragEnter = {
+    param($s, $e)
+    if ($e.Data.GetDataPresent([System.Windows.Forms.DataFormats]::FileDrop)) {
         $files = $e.Data.GetData([System.Windows.Forms.DataFormats]::FileDrop)
     
-        if ($files.Count -gt 0) {
-            # *** MODIFICATION: Collect and display ALL valid files, separated by a semicolon ***
-            $validFiles = @()
-        
-            foreach ($file in $files) {
-                # MODIFIED: Check for .json as well
-                $ext = [System.IO.Path]::GetExtension($file).ToLower()
-                if ($ext -in @(".zip", ".html", ".json")) {
-                    $validFiles += $file
-                }
-                else {
-                    Write-Status "Skipped file due to invalid type: $file"
-                }
-            }
-        
-            if ($validFiles.Count -gt 0) {
-                $fileList = $validFiles -join ";"
-                $txtFilePath.Text = $fileList
-                Write-Status "Files selected by drag-drop: $($validFiles.Count) valid files selected."
+        # Check for valid extensions
+        $hasValidFile = $files | Where-Object { 
+            $ext = [System.IO.Path]::GetExtension($_).ToLower()
+            $ext -in @(".zip", ".html", ".json")
+        }
+    
+        if ($hasValidFile) {
+            $e.Effect = [System.Windows.Forms.DragDropEffects]::Copy
             
-                # Since multiple files are selected, update the hint label to prompt the user to click Install
-                $lblHint.Text = "Multiple files loaded. Click **'Install Item(s)'** to process them sequentially."
-            }
-            else {
-                Write-Status "No valid .zip, .html, or .json files were dropped."
-                $txtFilePath.Text = ""
+            # --- VISUAL FEEDBACK START ---
+            # Light up the layout background with semi-transparent Green
+            $fileInputLayout.BackColor = [System.Drawing.Color]::FromArgb(50, 0, 255, 0) 
+            
+            # Make the hint text bold and yellow
+            $lblHint.Text = "!!! DROP FILES HERE !!!"
+            $lblHint.ForeColor = [System.Drawing.Color]::Yellow
+            $lblHint.Font = New-Object System.Drawing.Font("Segoe UI", 10, [System.Drawing.FontStyle]::Bold)
+            # --- VISUAL FEEDBACK END ---
+        }
+    }
+}
+
+# 2. Define "Drag Leave" (Reset Visuals if user cancels)
+$onDragLeave = {
+    param($s, $e)
+    # --- RESET VISUALS ---
+    $fileInputLayout.BackColor = [System.Drawing.Color]::Transparent
+    $lblHint.Text = "Drag-and-drop a .zip, .html, or .json file here, or click Browse."
+    $lblHint.ForeColor = [System.Drawing.Color]::White
+    $lblHint.Font = New-Object System.Drawing.Font("Segoe UI", 9, [System.Drawing.FontStyle]::Italic)
+}
+
+# 3. Define "Drag Drop" (Process Files + Reset Visuals)
+$onDragDrop = {
+    param($s, $e)
+    
+    # Immediately reset the visuals to normal
+    $onDragLeave.Invoke($s, $e)
+
+    # Process the dropped files
+    $files = $e.Data.GetData([System.Windows.Forms.DataFormats]::FileDrop)
+    if ($files.Count -gt 0) {
+        $validFiles = @()
+        foreach ($file in $files) {
+            $ext = [System.IO.Path]::GetExtension($file).ToLower()
+            if ($ext -in @(".zip", ".html", ".json")) {
+                $validFiles += $file
             }
         }
-    })
+    
+        if ($validFiles.Count -gt 0) {
+            $fileList = $validFiles -join ";"
+            $txtFilePath.Text = $fileList
+            Write-Status "Files loaded: $($validFiles.Count) valid files."
+            
+            # Update hint to show readiness
+            $lblHint.Text = "Files loaded! Click **'Install Item(s)'** to finish."
+            $lblHint.ForeColor = [System.Drawing.Color]::Cyan
+        }
+        else {
+            Write-Status "Ignored invalid files."
+        }
+    }
+}
+
+# 4. Attach these events to BOTH the TextBox and the Layout Panel
+# This creates the "Big Drop Target" feel
+$txtFilePath.Add_DragEnter($onDragEnter)
+$txtFilePath.Add_DragLeave($onDragLeave)
+$txtFilePath.Add_DragDrop($onDragDrop)
+
+$fileInputLayout.Add_DragEnter($onDragEnter)
+$fileInputLayout.Add_DragLeave($onDragLeave)
+$fileInputLayout.Add_DragDrop($onDragDrop)
 
 # Browse Button
 $btnBrowse.Add_Click({
@@ -1824,13 +2199,13 @@ $btnBrowse.Add_Click({
         # MODIFIED: Updated filter to include .json
         $openFileDialog.Filter = "SignalRGB Files (*.zip, *.html, *.json)|*.zip;*.html;*.json|All Files (*.*)|*.*"
         $openFileDialog.Title = "Select Effect or Component File(s)"
-    
+
         $openFileDialog.Multiselect = $true
-    
+
         if ($openFileDialog.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) {
             # The FileNames property returns an array of selected files.
             $selectedFiles = $openFileDialog.FileNames
-        
+    
             # Filter for valid file types and join them with the semicolon separator
             $validFiles = @()
             foreach ($file in $selectedFiles) {
@@ -1840,12 +2215,12 @@ $btnBrowse.Add_Click({
                     $validFiles += $file
                 }
             }
-        
+    
             if ($validFiles.Count -gt 0) {
                 $fileList = $validFiles -join ";"
                 $txtFilePath.Text = $fileList
                 Write-Status "Files selected via browse: $($validFiles.Count) valid files selected."
-            
+        
                 # Update hint label to match batch installation mode
                 if ($validFiles.Count -gt 1) {
                     $lblHint.Text = "Multiple files loaded. Click **'Install Item(s)'** to process them sequentially."
@@ -1865,14 +2240,14 @@ $btnBrowse.Add_Click({
 # Install Button
 $btnInstall.Add_Click({
         $filePathText = $txtFilePath.Text.Trim()
-    
+
         if ([string]::IsNullOrWhiteSpace($filePathText)) {
             [System.Windows.Forms.MessageBox]::Show("Please select a file(s) to install first.", "No File Selected", "OK", "Warning") | Out-Null
             return
         }
-    
+
         $filesToInstall = $filePathText.Split(";") | Where-Object { -not [string]::IsNullOrWhiteSpace($_) }
-    
+
         if ($filesToInstall.Count -eq 0) {
             [System.Windows.Forms.MessageBox]::Show("No valid file paths found.", "Error", "OK", "Error") | Out-Null
             return
@@ -1885,7 +2260,7 @@ $btnInstall.Add_Click({
         $btnInstall.Enabled = $false
         $btnInstall.Text = "Installing..."
         $Global:mainForm.Refresh()
-    
+
         try {
             foreach ($file in $filesToInstall) {
                 if (-not (Test-Path -Path $file)) {
@@ -1894,22 +2269,22 @@ $btnInstall.Add_Click({
                     continue
                 }
                 Write-Status "--- Starting Sequential Install for: $file ---"
-            
+        
                 # Capture the return status from Start-Installation
                 $isRestartNeededForFile = Start-Installation -FilePath $file
-            
+        
                 if ($isRestartNeededForFile) {
                     $batchRestartRequired = $true
                 }
 
                 Write-Status "--- Finished Install for: $file ---"
             }
-        
+    
             # FINAL RESTART PROMPT (Only executed if at least one file needed a restart)
             if ($batchRestartRequired) {
                 Write-Status "One or more new items were installed. Prompting user to restart $AppName."
                 $restartResult = [System.Windows.Forms.MessageBox]::Show("All files processed.`n`n$AppName must be restarted to load the new item(s). Restart now?", "Restart Required", "YesNo", "Question")
-            
+        
                 if ($restartResult -eq 'Yes') {
                     Write-Status "User chose to restart."
                     Write-Status "Attempting to stop $AppName to force reload..."
@@ -1938,7 +2313,7 @@ $btnInstall.Add_Click({
                 Write-Status "Batch installation complete. No restart was required."
                 [System.Windows.Forms.MessageBox]::Show("Batch installation complete.`n`nNo restart of $AppName was required.", "Installation Complete", "OK", "Information") | Out-Null
             }
-        
+    
         }
         catch {
             Write-Status "Unhandled exception during file iteration: $($_.Exception.Message)"
@@ -1947,7 +2322,7 @@ $btnInstall.Add_Click({
             # Re-enable button
             $btnInstall.Enabled = $true
             $btnInstall.Text = "Install Item(s)" # MODIFIED
-        
+    
             # Clear text box after batch installation is complete
             $txtFilePath.Text = ""
             $lblHint.Text = "Drag-and-drop a .zip, .html, or .json file here, or click Browse." # MODIFIED
@@ -1978,7 +2353,7 @@ $btnOpenFolder.Add_Click({
         $userDir = $null
         try {
             $userDir = (Get-ItemProperty -Path $RegKey -Name $RegValue).$RegValue
-            
+        
             if ($userDir -and (Test-Path -Path $userDir)) {
                 Write-Status "Opening folder in Explorer: $userDir"
                 Invoke-Item -Path $userDir
@@ -1995,5 +2370,5 @@ $btnOpenFolder.Add_Click({
     })
 
 # --- Show the Form ---
-Write-Status "GUI Initialized. Showing main window."
+# Write-Status "GUI Initialized. Showing main window."
 [System.Windows.Forms.Application]::Run($Global:mainForm)
