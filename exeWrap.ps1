@@ -1,1 +1,1 @@
-Invoke-ps2exe -inputFile ".\installer.ps1" -outputFile ".\SignalRGB_Installer.exe" -noConsole
+Invoke-ps2exe -inputFile ".\installer.ps1" -outputFile ".\bin\SignalRGB_Installer.exe" -noConsole
