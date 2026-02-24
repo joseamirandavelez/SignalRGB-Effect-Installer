@@ -385,7 +385,7 @@ function Show-CreateShortcutWindow {
                 $wsShell = New-Object -ComObject WScript.Shell
 
                 # Get the full path to the launch.vbs script
-                $targetFile = Join-Path -Path $Global:ScriptDirectory -ChildPath "launch.vbs"
+                $targetFile = Join-Path -Path $Global:ScriptDirectory -ChildPath "SignalRGB_Installer.exe"
                 # The VBScript handles all arguments, so this should be empty
                 $arguments = ""
 
