@@ -1,7 +1,7 @@
 #Requires -Version 5.1
 
 # --- Versioning ---
-$ScriptVersion = "1.6"
+$ScriptVersion = "1.7"
 $RepoOwner = "joseamirandavelez"
 $RepoName = "SignalRGB-Effect-Installer"
 
