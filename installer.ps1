@@ -619,10 +619,13 @@ function Show-UninstallWindow {
         $totalItems = 0
 
         Write-Status "Refreshing effect list from: $effectsBasePath"
-        if (Test-Path -Path $effectsBasePath) {
+        if (Test-Path -LiteralPath $effectsBasePath) {
             try {
-                $effects = Get-ChildItem -Path $effectsBasePath -Directory | ForEach-Object { $_.Name } | Sort-Object
-                $clbEffects.Items.AddRange($effects)
+                # FIX: Force the result into an array to prevent PowerShell from unrolling a single string into characters
+                $effects = @(Get-ChildItem -LiteralPath $effectsBasePath -Directory | ForEach-Object { $_.Name } | Sort-Object)
+                if ($effects.Count -gt 0) {
+                    $clbEffects.Items.AddRange([object[]]$effects)
+                }
                 $totalItems += $effects.Count
                 Write-Status "Found $($effects.Count) effects."
             }
@@ -635,10 +638,10 @@ function Show-UninstallWindow {
         }
 
         Write-Status "Refreshing component list from: $componentsBasePath"
-        if (Test-Path -Path $componentsBasePath) {
+        if (Test-Path -LiteralPath $componentsBasePath) {
             try {
                 # --- MODIFICATION: Get component names from JSON files ---
-                $componentFiles = Get-ChildItem -Path $componentsBasePath -Filter "*.json"
+                $componentFiles = @(Get-ChildItem -LiteralPath $componentsBasePath -Filter "*.json")
                 $componentList = @()
                 
                 foreach ($file in $componentFiles) {
@@ -651,9 +654,11 @@ function Show-UninstallWindow {
                 }
                 
                 # Sort the list of objects by their display name
-                $sortedList = $componentList | Sort-Object -Property DisplayName
+                $sortedList = @($componentList | Sort-Object -Property DisplayName)
                 
-                $clbComponents.Items.AddRange($sortedList)
+                if ($sortedList.Count -gt 0) {
+                    $clbComponents.Items.AddRange([object[]]$sortedList)
+                }
                 $totalItems += $sortedList.Count
                 Write-Status "Found $($sortedList.Count) components."
                 # --- End of MODIFICATION ---
@@ -676,31 +681,30 @@ function Show-UninstallWindow {
     $btnDelete.Add_Click({
             # --- SCRIPT CHANGE: Get checked items from both lists ---
             $selectedItems = @()
-            
+        
             foreach ($item in $clbEffects.CheckedItems) {
                 $selectedItems += "[Effect] $item"
             }
-            
+        
             # --- MODIFICATION: Get the FileName property from the selected object ---
             foreach ($item in $clbComponents.CheckedItems) {
                 # $item is now a PSCustomObject
                 $selectedItems += "[Component] $($item.FileName)"
             }
             # --- End of MODIFICATION ---
-            
+        
             if ($selectedItems.Count -eq 0) {
                 [System.Windows.Forms.MessageBox]::Show("Please select one or more items to delete.", "No Selection", "OK", "Information") | Out-Null
                 return
             }
 
             # --- Logic to determine if the active effect is being deleted ---
-            # --- SCRIPT CHANGE: Get effect folders from the $clbEffects list ---
             $originalEffectFolders = @($clbEffects.Items)
             $currentAlwaysTitle = ""
             $currentAlwaysFolder = $null
-        
+    
             try {
-                $currentAlwaysTitle = (Get-ItemProperty -Path "HKCU:\Software\WhirlwindFX\SignalRgb\effects\selected" -Name "always" -ErrorAction SilentlyContinue).always
+                $currentAlwaysTitle = (Get-ItemProperty -LiteralPath "HKCU:\Software\WhirlwindFX\SignalRgb\effects\selected" -Name "always" -ErrorAction SilentlyContinue).always
             }
             catch {
                 Write-Status "Could not read current 'always' key. Will not update registry on delete."
@@ -709,18 +713,26 @@ function Show-UninstallWindow {
             if (-not [string]::IsNullOrWhiteSpace($currentAlwaysTitle)) {
                 # Find the folder name that corresponds to the active title
                 foreach ($folderName in $originalEffectFolders) {
-                    $effectHtmlPath = Join-Path -Path $effectsBasePath -ChildPath "$folderName\$folderName.html"
-                    $title = Get-EffectTitleFromHtml -HtmlFilePath $effectHtmlPath
+                
+                    # SCRIPT FIX: Join-Path uses -Path, Get-ChildItem uses -LiteralPath
+                    $folderPath = Join-Path -Path $effectsBasePath -ChildPath $folderName
+                    $htmlFiles = @(Get-ChildItem -LiteralPath $folderPath -Filter "*.html" -ErrorAction SilentlyContinue)
+                
+                    if ($htmlFiles.Count -gt 0) {
+                        # Check the first HTML file found
+                        $title = Get-EffectTitleFromHtml -HtmlFilePath $htmlFiles[0].FullName
                     
-                    if (-not [string]::IsNullOrWhiteSpace($title) -and $currentAlwaysTitle.Equals($title, [StringComparison]::OrdinalIgnoreCase)) {
-                        $currentAlwaysFolder = $folderName
-                        break
+                        if (-not [string]::IsNullOrWhiteSpace($title) -and $currentAlwaysTitle.Equals($title, [StringComparison]::OrdinalIgnoreCase)) {
+                            $currentAlwaysFolder = $folderName
+                            break
+                        }
                     }
                 }
             }
-        
+    
             $activeEffectFolderWasDeleted = $false
-            $selectedEffectItems = $selectedItems | Where-Object { $_ -like '[Effect]*' }
+            # Ensure selectedEffectItems is an array even if only 1 item is selected
+            $selectedEffectItems = @($selectedItems | Where-Object { $_ -like '[Effect]*' })
             if ($currentAlwaysFolder -and $selectedEffectItems -contains "[Effect] $currentAlwaysFolder") {
                 $activeEffectFolderWasDeleted = $true
                 Write-Status "Active effect '$currentAlwaysTitle' is scheduled for deletion."
@@ -731,7 +743,7 @@ function Show-UninstallWindow {
             if ($activeEffectFolderWasDeleted) {
                 Write-Status "Updating active effect registry keys..."
                 $remainingEffectFolders = @($originalEffectFolders | Where-Object { $_ -notin ($selectedEffectItems | ForEach-Object { $_ -replace '^\[Effect\] ', '' }) })
-            
+        
                 if ($remainingEffectFolders.Count -eq 0) {
                     # No effects left, set to empty
                     Write-Status "All effects deleted. Setting active effect to empty."
@@ -741,12 +753,12 @@ function Show-UninstallWindow {
                     # Find the effect that was alphabetically before the one we deleted
                     $originalIndex = [array]::IndexOf($originalEffectFolders, $currentAlwaysFolder)
                     $newIndex = $originalIndex - 1
-                
+            
                     if ($newIndex -lt 0) {
                         # It was the first item, wrap around to the end of the *remaining* list
                         $newIndex = $remainingEffectFolders.Count - 1
                     }
-                
+            
                     # Check that the new index is valid for the remaining list
                     if ($newIndex -ge $remainingEffectFolders.Count) {
                         # This can happen if we delete the last item. Default to the new last item.
@@ -754,18 +766,26 @@ function Show-UninstallWindow {
                     }
 
                     $newEffectFolder = $remainingEffectFolders[$newIndex]
-                    $newEffectHtmlPath = Join-Path -Path $effectsBasePath -ChildPath "$newEffectFolder\$newEffectFolder.html"
-                    $newEffectTitle = Get-EffectTitleFromHtml -HtmlFilePath $newEffectHtmlPath
                 
-                    Write-Status "Setting new active effect to: '$newEffectTitle'"
-                    Set-ActiveEffectRegistryKeys -NewEffectTitle $newEffectTitle
+                    # SCRIPT FIX: Join-Path uses -Path, Get-ChildItem uses -LiteralPath
+                    $newFolderPath = Join-Path -Path $effectsBasePath -ChildPath $newEffectFolder
+                    $newHtmlFiles = @(Get-ChildItem -LiteralPath $newFolderPath -Filter "*.html" -ErrorAction SilentlyContinue)
+                
+                    if ($newHtmlFiles.Count -gt 0) {
+                        $newEffectTitle = Get-EffectTitleFromHtml -HtmlFilePath $newHtmlFiles[0].FullName
+                        Write-Status "Setting new active effect to: '$newEffectTitle'"
+                        Set-ActiveEffectRegistryKeys -NewEffectTitle $newEffectTitle
+                    }
+                    else {
+                        Write-Status "WARNING: Could not find an HTML file in '$newEffectFolder' to set as active."
+                    }
                 }
             }
             # --- End of moved block ---
 
             # --- SCRIPT FIX: Use FileSystem.Delete... to send to Recycle Bin ---
             foreach ($fullItemName in $selectedItems) {
-                
+            
                 $itemName = $null
                 $itemType = "Unknown"
 
@@ -774,9 +794,10 @@ function Show-UninstallWindow {
                         $itemName = $fullItemName.Substring(9)
                         $itemType = "Effect"
                         $itemFolder = Join-Path -Path $effectsBasePath -ChildPath $itemName
-                        
+                    
                         Write-Status "Moving ${itemType} to Recycle Bin: $itemName"
-                        if (Test-Path -Path $itemFolder) {
+                        # FIX: Use LiteralPath to prevent bracket errors on folders
+                        if (Test-Path -LiteralPath $itemFolder) {
                             [Microsoft.VisualBasic.FileIO.FileSystem]::DeleteDirectory(
                                 $itemFolder, 
                                 [Microsoft.VisualBasic.FileIO.UIOption]::OnlyErrorDialogs, 
@@ -790,13 +811,14 @@ function Show-UninstallWindow {
                     elseif ($fullItemName.StartsWith("[Component] ")) {
                         $itemName = $fullItemName.Substring(12) # $itemName is now "MyComponent.json"
                         $itemType = "Component"
-                        
+                    
                         $jsonFilePath = Join-Path -Path $componentsBasePath -ChildPath $itemName
                         $pngFilePath = Join-Path -Path $componentsBasePath -ChildPath "$([System.IO.Path]::GetFileNameWithoutExtension($itemName)).png"
-                        
+                    
                         Write-Status "Moving ${itemType} to Recycle Bin: $itemName"
-                        
-                        if (Test-Path -Path $jsonFilePath) {
+                    
+                        # FIX: Use LiteralPath
+                        if (Test-Path -LiteralPath $jsonFilePath) {
                             [Microsoft.VisualBasic.FileIO.FileSystem]::DeleteFile(
                                 $jsonFilePath, 
                                 [Microsoft.VisualBasic.FileIO.UIOption]::OnlyErrorDialogs, 
@@ -806,9 +828,9 @@ function Show-UninstallWindow {
                         else {
                             Write-Status "File '$jsonFilePath' not found for deletion. Skipping."
                         }
-                        
+                    
                         # Conditionally delete matching .png
-                        if (Test-Path -Path $pngFilePath) {
+                        if (Test-Path -LiteralPath $pngFilePath) {
                             [Microsoft.VisualBasic.FileIO.FileSystem]::DeleteFile(
                                 $pngFilePath, 
                                 [Microsoft.VisualBasic.FileIO.UIOption]::OnlyErrorDialogs, 
@@ -826,9 +848,9 @@ function Show-UninstallWindow {
                 }
             }
             # --- End of script fix ---
-        
+    
             Write-Status "Deletion complete."
-        
+    
             # Refresh the list
             $populateList.Invoke()
         })
@@ -1744,7 +1766,7 @@ if ($args.Count -gt 0) {
         if ($restartResult -eq 'Yes') {
             Write-Host "User chose to restart."
             try {
-                Start-Process "signalrgb://app/restart" -ErrorAction Stop
+                Start-Process "https://srgbmods.net/s?p=app/restart" -ErrorAction Stop
                 Write-Host "Restart signal sent to $AppName."
             }
             catch {
@@ -2025,123 +2047,123 @@ $mainLayout.Controls.Add($script:txtStatus, 0, 3)
 # --- Form and Control Event Handlers ---
 
 $Global:mainForm.Add_Shown({
-    # Enable Dark Mode
-    Set-WindowDarkMode -Form $Global:mainForm
+        # Enable Dark Mode
+        Set-WindowDarkMode -Form $Global:mainForm
 
-    # 1. Handle the Window Title Bar Icon (Extract from EXE)
-    try {
-        $currentProcess = [System.Diagnostics.Process]::GetCurrentProcess().MainModule.FileName
-        $extractedIcon = [System.Drawing.Icon]::ExtractAssociatedIcon($currentProcess)
-        $Global:mainForm.Icon = $extractedIcon
-        Write-Status "Window icon loaded from executable resources."
-    }
-    catch {
-        Write-Status "Resource Error (Icon): $($_.Exception.Message)"
-    }
-
-    # 2. Handle the PictureBox Logo (Prefer Base64 -> then File -> then Icon Fallback)
-    $logoSuccessfullySet = $false
-
-    # Try loading from the Base64 string first (Most reliable for EXE)
-    if (-not [string]::IsNullOrEmpty($logoBase64)) {
+        # 1. Handle the Window Title Bar Icon (Extract from EXE)
         try {
-            $imageBytes = [System.Convert]::FromBase64String($logoBase64)
-            $ms = New-Object System.IO.MemoryStream($imageBytes, 0, $imageBytes.Length)
-            $Global:picLogo.Image = [System.Drawing.Image]::FromStream($ms)
-            $logoSuccessfullySet = $true
-            Write-Status "Logo loaded from embedded Base64 string."
+            $currentProcess = [System.Diagnostics.Process]::GetCurrentProcess().MainModule.FileName
+            $extractedIcon = [System.Drawing.Icon]::ExtractAssociatedIcon($currentProcess)
+            $Global:mainForm.Icon = $extractedIcon
+            Write-Status "Window icon loaded from executable resources."
         }
         catch {
-            Write-Status "Base64 Logo Error: $($_.Exception.Message)"
+            Write-Status "Resource Error (Icon): $($_.Exception.Message)"
         }
-    }
 
-    # If Base64 failed, try loading from local file
-    if (-not $logoSuccessfullySet -and (Test-Path -Path $localLogoPath)) {
+        # 2. Handle the PictureBox Logo (Prefer Base64 -> then File -> then Icon Fallback)
+        $logoSuccessfullySet = $false
+
+        # Try loading from the Base64 string first (Most reliable for EXE)
+        if (-not [string]::IsNullOrEmpty($logoBase64)) {
+            try {
+                $imageBytes = [System.Convert]::FromBase64String($logoBase64)
+                $ms = New-Object System.IO.MemoryStream($imageBytes, 0, $imageBytes.Length)
+                $Global:picLogo.Image = [System.Drawing.Image]::FromStream($ms)
+                $logoSuccessfullySet = $true
+                Write-Status "Logo loaded from embedded Base64 string."
+            }
+            catch {
+                Write-Status "Base64 Logo Error: $($_.Exception.Message)"
+            }
+        }
+
+        # If Base64 failed, try loading from local file
+        if (-not $logoSuccessfullySet -and (Test-Path -Path $localLogoPath)) {
+            try {
+                $bytes = [System.IO.File]::ReadAllBytes($localLogoPath)
+                $ms = New-Object System.IO.MemoryStream($bytes)
+                $Global:picLogo.Image = [System.Drawing.Image]::FromStream($ms)
+                $logoSuccessfullySet = $true
+                Write-Status "Logo loaded from local file: logo.png"
+            }
+            catch {
+                Write-Status "Local Logo Error: $($_.Exception.Message)"
+            }
+        }
+
+        # Final Fallback: If still nothing, use the extracted Icon for the PictureBox
+        if (-not $logoSuccessfullySet -and $null -ne $Global:mainForm.Icon) {
+            $Global:picLogo.Image = $Global:mainForm.Icon.ToBitmap()
+            Write-Status "Logo fell back to extracted executable icon."
+        }
+
+        # --- Check for missing items (Robust Logic) ---
+        Write-Status "--- Checking for Installer Shortcuts and Registry Keys ---"
+
+        # Check Shortcut Files
+        $desktopExists = (Test-Path -Path $Global:DesktopShortcutPath -PathType Leaf)
+        $startMenuExists = (Test-Path -Path $Global:StartMenuShortcutPath -PathType Leaf)
+        $sendToExists = (Test-Path -Path $Global:SendToShortcutPath -PathType Leaf)
+
+        # Check Registry Key (Open With)
+        $openWithKeyPath = "HKCU:\Software\Microsoft\Windows\CurrentVersion\App Paths\SignalRGB Installer.exe"
+        $openWithExists = Test-Path -Path $openWithKeyPath
+
+        $isAnyMissing = (-not $desktopExists -or -not $startMenuExists -or -not $sendToExists -or -not $openWithExists)
+
+        Write-Status "Desktop: $desktopExists, Start Menu: $startMenuExists, Send To: $sendToExists, Open With Reg: $openWithExists"
+
+        if ($isAnyMissing) {
+            Write-Status "One or more desired setup items are missing. Prompting user."
+            $promptResult = [System.Windows.Forms.MessageBox]::Show("Would you like to create shortcuts on your Desktop, Start Menu, 'Send To' menu, and/or 'Open with' context menu?", "Create Shortcut/Registry?", "YesNo", "Question")
+
+            if ($promptResult -eq 'Yes') {
+                # Pre-check the boxes for the missing ones only
+                Show-CreateShortcutWindow -ScriptDirectory $Global:ScriptDirectory -IconPath $localIconPath -CheckDesktop (-not $desktopExists) -CheckStartMenu (-not $startMenuExists) -CheckSendTo (-not $sendToExists) -CheckOpenWith (-not $openWithExists)
+            }
+        }
+
+        # Initial Log of Registry Key
         try {
-            $bytes = [System.IO.File]::ReadAllBytes($localLogoPath)
-            $ms = New-Object System.IO.MemoryStream($bytes)
-            $Global:picLogo.Image = [System.Drawing.Image]::FromStream($ms)
-            $logoSuccessfullySet = $true
-            Write-Status "Logo loaded from local file: logo.png"
+            Write-Status "Reading registry key: $RegKey"
+            $userDir = (Get-ItemProperty -Path $RegKey -Name $RegValue).$RegValue
+            Write-Status "Found SignalRGB User Directory: $userDir"
+            $effectsDir = Join-Path -Path $userDir -ChildPath $EffectsSubFolder
+            $componentsDir = Join-Path -Path $userDir -ChildPath $ComponentsSubFolder
+            Write-Status "Effect install directory set to: $effectsDir"
+            Write-Status "Component install directory set to: $componentsDir"
         }
         catch {
-            Write-Status "Local Logo Error: $($_.Exception.Message)"
+            Write-Status "ERROR: Could not read SignalRGB registry key on startup."
         }
-    }
 
-    # Final Fallback: If still nothing, use the extracted Icon for the PictureBox
-    if (-not $logoSuccessfullySet -and $null -ne $Global:mainForm.Icon) {
-        $Global:picLogo.Image = $Global:mainForm.Icon.ToBitmap()
-        Write-Status "Logo fell back to extracted executable icon."
-    }
-
-    # --- Check for missing items (Robust Logic) ---
-    Write-Status "--- Checking for Installer Shortcuts and Registry Keys ---"
-
-    # Check Shortcut Files
-    $desktopExists = (Test-Path -Path $Global:DesktopShortcutPath -PathType Leaf)
-    $startMenuExists = (Test-Path -Path $Global:StartMenuShortcutPath -PathType Leaf)
-    $sendToExists = (Test-Path -Path $Global:SendToShortcutPath -PathType Leaf)
-
-    # Check Registry Key (Open With)
-    $openWithKeyPath = "HKCU:\Software\Microsoft\Windows\CurrentVersion\App Paths\SignalRGB Installer.exe"
-    $openWithExists = Test-Path -Path $openWithKeyPath
-
-    $isAnyMissing = (-not $desktopExists -or -not $startMenuExists -or -not $sendToExists -or -not $openWithExists)
-
-    Write-Status "Desktop: $desktopExists, Start Menu: $startMenuExists, Send To: $sendToExists, Open With Reg: $openWithExists"
-
-    if ($isAnyMissing) {
-        Write-Status "One or more desired setup items are missing. Prompting user."
-        $promptResult = [System.Windows.Forms.MessageBox]::Show("Would you like to create shortcuts on your Desktop, Start Menu, 'Send To' menu, and/or 'Open with' context menu?", "Create Shortcut/Registry?", "YesNo", "Question")
-
-        if ($promptResult -eq 'Yes') {
-            # Pre-check the boxes for the missing ones only
-            Show-CreateShortcutWindow -ScriptDirectory $Global:ScriptDirectory -IconPath $localIconPath -CheckDesktop (-not $desktopExists) -CheckStartMenu (-not $startMenuExists) -CheckSendTo (-not $sendToExists) -CheckOpenWith (-not $openWithExists)
-        }
-    }
-
-    # Initial Log of Registry Key
-    try {
-        Write-Status "Reading registry key: $RegKey"
-        $userDir = (Get-ItemProperty -Path $RegKey -Name $RegValue).$RegValue
-        Write-Status "Found SignalRGB User Directory: $userDir"
-        $effectsDir = Join-Path -Path $userDir -ChildPath $EffectsSubFolder
-        $componentsDir = Join-Path -Path $userDir -ChildPath $ComponentsSubFolder
-        Write-Status "Effect install directory set to: $effectsDir"
-        Write-Status "Component install directory set to: $componentsDir"
-    }
-    catch {
-        Write-Status "ERROR: Could not read SignalRGB registry key on startup."
-    }
-
-    # --- NEW: RGB ANIMATION TIMER ---
-    $rgbTimer = New-Object System.Windows.Forms.Timer
-    $rgbTimer.Interval = 100 # Update every 100ms
-    $rgbTimer.Add_Tick({
-            # Increment Hue (0 to 360)
-            $script:hue += 1
-            if ($script:hue -ge 360) { $script:hue = 0 }
+        # --- NEW: RGB ANIMATION TIMER ---
+        $rgbTimer = New-Object System.Windows.Forms.Timer
+        $rgbTimer.Interval = 100 # Update every 100ms
+        $rgbTimer.Add_Tick({
+                # Increment Hue (0 to 360)
+                $script:hue += 1
+                if ($script:hue -ge 360) { $script:hue = 0 }
     
-            # Calculate new dark color
-            $newColor = Get-RGBColor -Hue $script:hue
+                # Calculate new dark color
+                $newColor = Get-RGBColor -Hue $script:hue
     
-            # Apply to Form
-            $Global:mainForm.BackColor = $newColor
-        })
-    $rgbTimer.Start()
-    # --- END NEW RGB ANIMATION TIMER ---
+                # Apply to Form
+                $Global:mainForm.BackColor = $newColor
+            })
+        $rgbTimer.Start()
+        # --- END NEW RGB ANIMATION TIMER ---
 
-    # Run update check slightly delayed to allow UI to render first
-    $timer = New-Object System.Windows.Forms.Timer
-    $timer.Interval = 1000 # 1 seconds
-    $timer.Add_Tick({
-            $this.Stop() 
-            Check-ForUpdates
-        })
-    $timer.Start()
-})
+        # Run update check slightly delayed to allow UI to render first
+        $timer = New-Object System.Windows.Forms.Timer
+        $timer.Interval = 1000 # 1 seconds
+        $timer.Add_Tick({
+                $this.Stop() 
+                Check-ForUpdates
+            })
+        $timer.Start()
+    })
 
 # --- Enhanced Drag and Drop Logic (Visual Drop Zone) ---
 
