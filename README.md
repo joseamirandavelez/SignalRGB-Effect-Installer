@@ -14,17 +14,17 @@
 The SignalRGB Effect Installer is a dedicated utility designed to simplify the process of adding custom effects, layouts, and assets to SignalRGB. Built for the community at RGBJunkie.com, this tool automates the manual placement of files, ensuring your custom lighting setups are ready to use with minimal effort.
 
 ## Features
-Automated Installation: Handles the complex task of placing HTML/PNG pairs and ZIP files into the correct SignalRGB directories.
-Smart Conflict Resolution: Intelligent logic to manage existing files, offering options to overwrite or rename to prevent data loss.
-Reliable App Integration: Includes a safe restart feature for SignalRGB to ensure new effects are indexed and visible immediately.
-Windows Integration: Automatically creates shortcuts for easy access to the installer.
-Clean UI: A straightforward interface with built-in progress tracking and clear status updates.
+- Handles the complex task of placing HTML/PNG pairs into the correct SignalRGB directories.
+- Smart Conflict Resolution: Intelligent logic to manage existing files, offering options to overwrite or rename to prevent data loss.
+- Reliable App Integration: Includes a safe restart feature for SignalRGB to ensure new effects are indexed and visible immediately.
+- Windows Integration: Automatically creates shortcuts for easy access to the installer.
+- Clean UI: A straightforward interface with built-in progress tracking and clear status updates.
 
 ## How It Works
-Launch: Open the installer and select your desired effect files.
-Process: The tool validates the file structure (HTML, PNG, or ZIP).
-Deploy: Files are moved to the %AppData%\WhirlwindFX\SignalRGB\Effects directory.
-Sync: The installer prompts a refresh/restart of SignalRGB to finalize the installation.
+- **Launch:** Open the installer and select your desired effect files.
+- **Process:** The tool validates the file structure (HTML, PNG, or ZIP).
+- **Deploy:** Files are moved to the %AppData%\WhirlwindFX\SignalRGB\Effects directory.
+- ** Sync:** The installer prompts a refresh/restart of SignalRGB to finalize the installation.
 
 ## Installation
 1. To use the installer:
@@ -46,4 +46,4 @@ Check out RGBJunkie.com for:
 ## License
 This project is licensed under the MIT License - see the LICENSE file for details.
 
-Maintained by José Miranda
+Maintained by [José Miranda](https://github.com/joseamirandavelez "José Miranda")
