@@ -3,7 +3,7 @@
 ![Github All Releases](https://img.shields.io/github/downloads/joseamirandavelez/SignalRGB-Effect-Installer/total.svg)
 ![GitHub release (latest by date)](https://img.shields.io/github/v/release/joseamirandavelez/SignalRGB-Effect-Installer)
 ![GitHub](https://img.shields.io/github/license/joseamirandavelez/SignalRGB-Effect-Installer)
-![GitHub branch checks state](https://img.shields.io/github/checks-status/joseamirandavelez/SignalRGB-Effect-Installer/master)
+![GitHub branch checks state](https://img.shields.io/github/checks-status/joseamirandavelez/SignalRGB-Effect-Installer/main)
 ![GitHub issues](https://img.shields.io/github/issues/joseamirandavelez/SignalRGB-Effect-Installer)
 ![GitHub forks](https://img.shields.io/github/forks/joseamirandavelez/SignalRGB-Effect-Installer?style=social)
 ![GitHub Repo stars](https://img.shields.io/github/stars/joseamirandavelez/SignalRGB-Effect-Installer?style=social)
