@@ -1,4 +1,4 @@
-# SignalRGB Effect Installer
+# RGBJunkie SignalRGB Effect Installer
 
 ![Github All Releases](https://img.shields.io/github/downloads/joseamirandavelez/SignalRGB-Effect-Installer/total.svg)
 ![GitHub release (latest by date)](https://img.shields.io/github/v/release/joseamirandavelez/SignalRGB-Effect-Installer)
@@ -11,7 +11,7 @@
 [![Donate via PayPal](https://img.shields.io/badge/Donate-Paypal-brightgreen)](https://paypal.me/joseamiranda)
 [![Follow on Patreon](https://img.shields.io/badge/Donate-Patreon-orange)](https://www.patreon.com/RGBJunkie)
 
-The SignalRGB Effect Installer is a dedicated utility designed to simplify the process of adding custom effects, layouts, and assets to SignalRGB. Built for the community at RGBJunkie.com, this tool automates the manual placement of files, ensuring your custom lighting setups are ready to use with minimal effort.
+The RGBJunkie SignalRGB Effect Installer is a dedicated utility designed to simplify the process of adding custom effects, layouts, and assets to SignalRGB. Built for the community at RGBJunkie.com, this tool automates the manual placement of files, ensuring your custom lighting setups are ready to use with minimal effort.
 
 ## Features
 - Handles the complex task of placing HTML/PNG pairs into the correct SignalRGB directories.
